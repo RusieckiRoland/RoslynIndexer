@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "RoslynIndexer.Net9": {
+      "commandName": "Project",
+      "commandLineArgs": "--config \"D:\\W\\config.json\""
+    }
+  }
+}

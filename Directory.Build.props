@@ -1,0 +1,34 @@
+<Project>
+  <PropertyGroup>
+    <!-- Global metadata applied to ALL projects under this folder (recursively) -->
+    <Company>NeptunTech Roland Rusiecki</Company>
+    <Authors>Roland Rusiecki</Authors>
+    <Product>RoslynIndexer</Product>
+
+    <!-- Repo info (used by NuGet + SourceLink) -->
+    <RepositoryUrl>https://github.com/RusieckiRoland/RoslynIndexer.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+
+    <!-- NuGet packaging defaults (safe even if you don't pack) -->
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/RusieckiRoland/RoslynIndexer</PackageProjectUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>roslyn;indexer;sql;rag</PackageTags>
+
+    <!-- Versioning (you can override per-project) -->
+    <VersionPrefix>0.1.0</VersionPrefix>
+    <!-- <VersionSuffix>preview.1</VersionSuffix> -->
+
+    <!-- CI-friendly builds -->
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+	  <!-- Quiet warnings: XML docs + nullability + fire-and-forget -->
+	  <GenerateDocumentationFile>false</GenerateDocumentationFile>
+	  <NoWarn>$(NoWarn);CS1591;CS4014;CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8619;CS8625</NoWarn>
+  </PropertyGroup>
+  <!-- When packing, include top-level README automatically -->
+  <ItemGroup Condition="'$(IsPackable)'=='true'">
+    <None Include="README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>	
+</Project>

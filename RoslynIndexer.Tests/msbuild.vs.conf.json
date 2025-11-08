@@ -1,0 +1,10 @@
+{
+  "msbuild": {
+    "VisualStudioVersion": "17.0",
+    "MSBuildExtensionsPath32": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\MSBuild",
+    "VSToolsPath": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\MSBuild\\Microsoft\\VisualStudio\\v17.0"
+  },
+  "externalTasks": {
+    "TransformXml": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\MSBuild\\Microsoft\\VisualStudio\\v17.0\\Web\\Microsoft.Web.Publishing.Tasks.dll"
+  }
+}

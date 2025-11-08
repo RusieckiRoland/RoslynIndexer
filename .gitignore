@@ -1,0 +1,58 @@
+## Pliki Visual Studio ##
+.vs/
+**/*.vsidx
+
+## Wyniki kompilacji ##
+bin/
+obj/
+*.exe
+*.dll
+*.pdb
+*.cache
+
+## Pliki użytkownika i konfiguracja środowiska ##
+*.user
+*.suo
+*.[Cc]ache
+*.userosscache
+*.sln.docstates
+
+## Pliki tymczasowe IDE ##
+**/x/s/
+**/v17/
+**/TestStore/
+**/*.testlog
+**/testlog.manifest
+**/.futdcache.v2
+**/DocumentLayout*.json
+
+## VS Code ##
+.vscode/
+
+## NuGet ##
+[Nn]u[Gg]et/
+*.nupkg
+packages/
+packages-*/
+
+## ReSharper ##
+_ReSharper*/
+*.[Rr]e[Ss]harper
+
+## Rider ##
+.idea/
+
+## Azure Functions ##
+azure-functions-cli/
+
+## Pliki systemowe ##
+.DS_Store
+Thumbs.db
+
+## Wyniki testów ##
+TestResults/
+*.trx
+*.coverage
+
+## Publikacja ##
+publish/

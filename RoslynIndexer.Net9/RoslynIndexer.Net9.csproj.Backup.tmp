@@ -1,0 +1,28 @@
+﻿<!-- RoslynIndexer.Net9/RoslynIndexer.Net9.csproj -->
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net9.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<RootNamespace>RoslynIndexer.Net9</RootNamespace>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\RoslynIndexer.Core\RoslynIndexer.Core.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<!-- Keep Roslyn packages aligned to the same version -->
+		<!-- Use a recent Locator to correctly find VS 2022/MSBuild for legacy projects -->
+		<PackageReference Include="Microsoft.Build.Locator" Version="1.7.8" />
+		<PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="4.8.0" />
+		<PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="4.8.0" />
+		<PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="9.0.0" />
+		<PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.0" />
+
+		<!-- Use stable .NET 9 extensions, not preview -->
+	</ItemGroup>
+
+</Project>

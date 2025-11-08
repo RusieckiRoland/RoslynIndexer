@@ -1,0 +1,32 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net9.0</TargetFramework>
+		<IsPackable>false</IsPackable>
+		<GenerateGlobalUsings>false</GenerateGlobalUsings>
+		<ImplicitUsings>disable</ImplicitUsings>
+	</PropertyGroup>
+	<PropertyGroup>
+		<NoWarn>NU1605</NoWarn>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="4.8.0" />
+		<PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+		<PackageReference Include="MSTest.TestAdapter" Version="3.4.3" />
+		<PackageReference Include="MSTest.TestFramework" Version="3.4.3" />
+		<PackageReference Include="Microsoft.Build.Framework" Version="17.11.4" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\\RoslynIndexer.Core\\RoslynIndexer.Core.csproj" />
+		<ProjectReference Include="..\\RoslynIndexer.Net9\\RoslynIndexer.Net9.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+	  <None Update="msbuild.vs.conf.json">
+	    <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+	  </None>
+	</ItemGroup>
+
+</Project>
