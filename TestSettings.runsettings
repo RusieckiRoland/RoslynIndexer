@@ -1,9 +1,0 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
-<RunSettings>
-  <RunConfiguration>
-    <EnvironmentVariables>
-      <!--  chunks.json path -->
-      <ARTIFACTS_DIR>D:\Indexer\Branches\main\Regular_code_bundle</ARTIFACTS_DIR>
-    </EnvironmentVariables>
-  </RunConfiguration>
-</RunSettings>
