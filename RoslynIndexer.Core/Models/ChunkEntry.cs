@@ -13,6 +13,12 @@
         public string Signature { get; set; }
         public string Text { get; set; }
 
+       
+        // Extra metadata for RAG
+        public string ProjectName { get; set; }          
+        public string BaseType { get; set; }             
+        public string[] ImplementedInterfaces { get; set; }
+
         // Git/meta context
         public string Branch { get; set; }
         public string HeadSha { get; set; }

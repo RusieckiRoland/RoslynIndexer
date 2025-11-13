@@ -18,11 +18,11 @@ namespace RoslynIndexer.Core.Services
     public sealed class CodeChunkExtractor
     {
         public async Task<(List<ChunkEntry> chunks, Dictionary<int, List<int>> deps)> ExtractAsync(
-            Solution solution,
-            string repoRoot,
-            string branchName,
-            string headSha,
-            CancellationToken cancellationToken)
+    Solution solution,
+    string repoRoot,
+    string branchName,
+    string headSha,
+    CancellationToken cancellationToken)
         {
             var allChunks = new List<ChunkEntry>();
             var dependencyGraph = new Dictionary<int, List<int>>();
@@ -36,6 +36,9 @@ namespace RoslynIndexer.Core.Services
 
             foreach (var project in solution.Projects)
             {
+                // Project-level metadata
+                var projectName = project.Name ?? string.Empty;
+
                 var compilation = await project.GetCompilationAsync(cancellationToken).ConfigureAwait(false);
                 if (compilation is null) continue;
 
@@ -111,6 +114,27 @@ namespace RoslynIndexer.Core.Services
                         var className = classDecl != null ? classDecl.Identifier.Text : "NoClass";
                         var namespaceName = namespaceDecl != null ? namespaceDecl.Name.ToString() : "NoNamespace";
 
+                        // Extra type-level metadata for RAG
+                        string baseTypeName = string.Empty;
+                        string[] implementedInterfaces = Array.Empty<string>();
+
+                        if (classDecl != null)
+                        {
+                            var classSymbol = semanticModel.GetDeclaredSymbol(classDecl, cancellationToken) as INamedTypeSymbol;
+                            if (classSymbol != null)
+                            {
+                                if (classSymbol.BaseType != null)
+                                {
+                                    baseTypeName = classSymbol.BaseType.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);
+                                }
+
+                                implementedInterfaces = classSymbol.AllInterfaces
+                                    .Select(i => i.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat))
+                                    .Distinct()
+                                    .ToArray();
+                            }
+                        }
+
                         var memberSignature = (symbol != null)
                             ? $"{namespaceName}.{className}.{symbol.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)}"
                             : $"{namespaceName}.{className}.{memberName}";
@@ -152,6 +176,13 @@ namespace RoslynIndexer.Core.Services
                             Type = memberType,
                             Signature = memberSignature,
                             Text = chunkText,
+
+                            // New fields
+                            ProjectName = projectName,
+                            BaseType = baseTypeName,
+                            ImplementedInterfaces = implementedInterfaces,
+
+                            // Git/meta context
                             Branch = branchName,
                             HeadSha = headSha,
                             RepoRelativePath = repoRel
@@ -209,5 +240,6 @@ namespace RoslynIndexer.Core.Services
 
             return (allChunks, dependencyGraph);
         }
+
     }
 }

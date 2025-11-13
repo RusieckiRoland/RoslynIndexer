@@ -90,7 +90,7 @@
     <!-- MSBuild Locator -->
     <PackageReference Include="Microsoft.Build.Locator" Version="1.9.1" />
     <!-- JSON -->
-    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
     <!-- *** KLUCZOWY FIX: wymuś nową wersję Microsoft.IO.Redist z obsługą ReadOnlySpan<char> *** -->
     <PackageReference Include="Microsoft.IO.Redist" Version="6.0.1" />
     <PackageReference Include="System.Text.Json">

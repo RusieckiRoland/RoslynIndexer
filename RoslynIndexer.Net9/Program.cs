@@ -166,25 +166,41 @@ internal class Program
         Console.WriteLine("[Core] Methods : " + csharp.MethodCount);
 
         // ===============================
-        // 7) Legacy SQL/EF GRAPH (opcjonalnie)
+        // 7) Legacy SQL/EF GRAPH (optional)
         // ===============================
-        if (!string.IsNullOrWhiteSpace(sqlPath))
+        var hasSql = !string.IsNullOrWhiteSpace(sqlPath);
+        var hasEf = !string.IsNullOrWhiteSpace(efPath);
+
+        if (hasSql || hasEf)
         {
-            var efExists = !string.IsNullOrWhiteSpace(efPath) && Directory.Exists(efPath);
-            Console.WriteLine(efExists
-                ? "[SQL/EF] Using EF root: " + efPath
-                : "[SQL/EF] EF root not provided or missing; graph will include SQL only.");
+            // If there is no SQL root, fall back to EF root so EF-only projects still produce a graph.
+            var sqlRootForGraph = hasSql ? sqlPath! : efPath!;
+            var efRootForGraph = hasEf ? efPath! : null;
+
+            if (hasSql && hasEf)
+            {
+                Console.WriteLine("[SQL/EF] Using SQL root: " + sqlPath + " and EF root: " + efPath);
+            }
+            else if (hasSql)
+            {
+                Console.WriteLine("[SQL/EF] Using SQL root: " + sqlPath + " (no EF root).");
+            }
+            else
+            {
+                Console.WriteLine("[SQL/EF] No SQL root provided; running EF-only graph from: " + efPath);
+            }
 
             LegacySqlIndexer.Start(
                 outputDir: tempRoot,
-                sqlProjectRoot: sqlPath!,
-                efRoot: efExists ? efPath! : null
+                sqlProjectRoot: sqlRootForGraph,
+                efRoot: efRootForGraph
             );
         }
         else
         {
-            Console.WriteLine("[SQL] Skipped (no --sql).");
+            Console.WriteLine("[SQL/EF] Skipped (no SQL or EF paths).");
         }
+
 
         // ===============================
         // 8) Git + chunks/deps → artifacts

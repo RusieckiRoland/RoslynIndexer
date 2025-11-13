@@ -157,22 +157,36 @@ namespace RoslynIndexer.Net48
             Console.WriteLine("[Core] Methods : " + csharp.MethodCount);
 
             // --- 7) Legacy SQL/EF GRAPH (optional; produces sql_bodies.jsonl expected by downstream pipeline) ---
-            if (!string.IsNullOrWhiteSpace(sqlPath))
+            var hasSql = !string.IsNullOrWhiteSpace(sqlPath);
+            var hasEf = !string.IsNullOrWhiteSpace(efPath);
+
+            // Guard: SQL path provided but folder missing → fail fast
+            if (hasSql && !Directory.Exists(sqlPath))
+                throw new DirectoryNotFoundException("[SQL] Path not found: " + sqlPath);
+
+            if (hasSql || hasEf)
             {
-                // Guard: provided but folder missing → fail fast (avoids silent skip)
-                if (!Directory.Exists(sqlPath))
-                    throw new DirectoryNotFoundException("[SQL] Path not found: " + sqlPath);
+                // If there is no SQL root, fall back to EF root so EF-only projects still produce a graph.
+                var sqlRootForGraph = hasSql ? sqlPath : efPath;
+                var efRootForGraph = hasEf ? efPath : null;
 
-                var efExists = !string.IsNullOrWhiteSpace(efPath) && Directory.Exists(efPath);
-                Console.WriteLine(efExists
-                    ? "[SQL/EF] Using EF root: " + efPath
-                    : "[SQL/EF] EF root not provided or missing; graph will include SQL only.");
+                if (hasSql && hasEf)
+                {
+                    Console.WriteLine("[SQL/EF] Using SQL root: " + sqlPath + " and EF root: " + efPath);
+                }
+                else if (hasSql)
+                {
+                    Console.WriteLine("[SQL/EF] Using SQL root: " + sqlPath + " (no EF root).");
+                }
+                else
+                {
+                    Console.WriteLine("[SQL/EF] No SQL root provided; running EF-only graph from: " + efPath);
+                }
 
-                // Fully-qualified to avoid adding a using outside this method
                 RoslynIndexer.Core.Sql.LegacySqlIndexer.Start(
                     outputDir: tempRoot,
-                    sqlProjectRoot: sqlPath,
-                    efRoot: efExists ? efPath : null
+                    sqlProjectRoot: sqlRootForGraph,
+                    efRoot: efRootForGraph
                 );
 
                 // Verify artifact expected by Python/Vector pipeline
@@ -183,14 +197,15 @@ namespace RoslynIndexer.Net48
                 if (sqlBodies == null)
                     throw new InvalidOperationException(
                         "[SQL] Expected 'sql_bodies.jsonl' not produced under " + tempRoot +
-                        ". Verify 'paths.sql' points to the SQL project root.");
+                        ". Verify 'paths.sql' or 'paths.ef' point to a valid project root.");
 
                 Console.WriteLine("[SQL] Produced: " + sqlBodies);
             }
             else
             {
-                Console.WriteLine("[SQL] Skipped (no --sql).");
+                Console.WriteLine("[SQL/EF] Skipped (no SQL or EF paths).");
             }
+
 
             // --- 8) Git metadata (adapter) ---
             var git = GitProbe.TryProbe(solutionPath);
