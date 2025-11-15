@@ -2,7 +2,7 @@
   "profiles": {
     "RoslynIndexer.Net9": {
       "commandName": "Project",
-      "commandLineArgs": "--config \"D:\\W\\config.json\""
+      "commandLineArgs": "--config \"D:\\\\TrainingCode\\\\TrainingCode\\\\config.json\""
     }
   }
 }

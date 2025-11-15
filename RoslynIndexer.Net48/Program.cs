@@ -7,6 +7,8 @@ using RoslynIndexer.Core.Helpers;       // ArchiveUtils
 using RoslynIndexer.Core.Models;
 using RoslynIndexer.Core.Pipeline;
 using RoslynIndexer.Core.Services;      // RepositoryScanner, FileHasher, CSharpAnalyzer
+using RoslynIndexer.Core.Sql;           // SqlEfGraphRunner
+using RoslynIndexer.Core.Logging;       // ConsoleLog
 
 using System;
 using System.Collections.Generic;
@@ -25,17 +27,17 @@ namespace RoslynIndexer.Net48
         {
             try
             {
-                Console.WriteLine("=== RoslynIndexer.Net48 bootstrap ===");
-                Console.WriteLine("[BOOT] Args: " + string.Join(" ", args ?? new string[0]));
+                ConsoleLog.Info("=== RoslynIndexer.Net48 bootstrap ===");
+                ConsoleLog.Info("[BOOT] Args: " + string.Join(" ", args ?? new string[0]));
                 Console.Out.Flush();
 
                 MainAsync(args).GetAwaiter().GetResult();
 
-                Console.WriteLine("=== DONE ===");
+                ConsoleLog.Info("=== DONE ===");
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine("[FATAL] " + ex);
+                ConsoleLog.Error("[FATAL] " + ex);
                 Environment.ExitCode = 1;
             }
         }
@@ -46,7 +48,7 @@ namespace RoslynIndexer.Net48
 
             // --- 1) CLI parse ---
             var cli = ParseArgs(args);
-            Console.WriteLine("[CLI] Parsed " + cli.Count + " arg(s).");
+            ConsoleLog.Info("[CLI] Parsed " + cli.Count + " arg(s).");
 
             // --- 2) Optional JSON config (JSON with comments, nested sections) ---
             JObject cfg = null;
@@ -62,8 +64,8 @@ namespace RoslynIndexer.Net48
                 cfg = loaded.Item1;
                 cfgBaseDir = loaded.Item2;
 
-                Console.WriteLine("[CFG] Loaded: " + cfgPath);
-                Console.WriteLine("[CFG] Root properties: " + string.Join(", ", cfg.Properties().Select(p => p.Name)));
+                ConsoleLog.Info("[CFG] Loaded: " + cfgPath);
+                ConsoleLog.Info("[CFG] Root properties: " + string.Join(", ", cfg.Properties().Select(p => p.Name)));
             }
             else
             {
@@ -105,6 +107,13 @@ namespace RoslynIndexer.Net48
                 Environment.GetEnvironmentVariable("EF_PATH")
             );
 
+            string efMigrationsPath = FirstNonEmpty(
+                FromCli(cli, "migrations"),
+                FromCfg(cfg, "paths.migrations", cfgBaseDir, true),
+                FromCfg(cfg, "migrations", cfgBaseDir, true),
+                Environment.GetEnvironmentVariable("MIGRATIONS_PATH")
+            );
+
             string inlineSql = FirstNonEmpty(
                 FromCli(cli, "inline-sql"),
                 FromCfg(cfg, "paths.inlineSql", cfgBaseDir, true),
@@ -120,12 +129,13 @@ namespace RoslynIndexer.Net48
             ApplyMsBuildPathOverrides(cfg, cli, cfgBaseDir);
 
             // Log inputs (Net9 style)
-            Console.WriteLine("[IN] solution   = " + solutionPath);
-            Console.WriteLine("[IN] temp-root  = " + tempRoot);
-            Console.WriteLine("[IN] out        = " + (outPath ?? "(null)"));
-            Console.WriteLine("[IN] sql        = " + (sqlPath ?? "(null)"));
-            Console.WriteLine("[IN] ef         = " + (efPath ?? "(null)"));
-            Console.WriteLine("[IN] inline-sql = " + (inlineSql ?? "(null)"));
+            ConsoleLog.Info("[IN] solution   = " + solutionPath);
+            ConsoleLog.Info("[IN] temp-root  = " + tempRoot);
+            ConsoleLog.Info("[IN] out        = " + (outPath ?? "(null)"));
+            ConsoleLog.Info("[IN] sql        = " + (sqlPath ?? "(null)"));
+            ConsoleLog.Info("[IN] ef         = " + (efPath ?? "(null)"));
+            ConsoleLog.Info("[IN] migrations = " + (efMigrationsPath ?? "(null)"));
+            ConsoleLog.Info("[IN] inline-sql = " + (inlineSql ?? "(null)"));
             Console.Out.Flush();
 
             Directory.CreateDirectory(tempRoot);
@@ -146,70 +156,25 @@ namespace RoslynIndexer.Net48
 
             var loader = new MsBuildWorkspaceLoader();
 
-            Console.WriteLine("[Core] Starting pipeline...");
+            ConsoleLog.Info("[Core] Starting pipeline...");
             var tuple = await pipeline.RunAsync(paths, loader, CancellationToken.None);
             var files = tuple.files;
             var csharp = tuple.csharp;
 
-            Console.WriteLine("[Core] Files   : " + files.Count);
-            Console.WriteLine("[Core] Projects: " + csharp.ProjectCount);
-            Console.WriteLine("[Core] Docs    : " + csharp.DocumentCount);
-            Console.WriteLine("[Core] Methods : " + csharp.MethodCount);
+            ConsoleLog.Info("[Core] Files   : " + files.Count);
+            ConsoleLog.Info("[Core] Projects: " + csharp.ProjectCount);
+            ConsoleLog.Info("[Core] Docs    : " + csharp.DocumentCount);
+            ConsoleLog.Info("[Core] Methods : " + csharp.MethodCount);
 
             // --- 7) Legacy SQL/EF GRAPH (optional; produces sql_bodies.jsonl expected by downstream pipeline) ---
-            var hasSql = !string.IsNullOrWhiteSpace(sqlPath);
-            var hasEf = !string.IsNullOrWhiteSpace(efPath);
-
-            // Guard: SQL path provided but folder missing → fail fast
-            if (hasSql && !Directory.Exists(sqlPath))
-                throw new DirectoryNotFoundException("[SQL] Path not found: " + sqlPath);
-
-            if (hasSql || hasEf)
-            {
-                // If there is no SQL root, fall back to EF root so EF-only projects still produce a graph.
-                var sqlRootForGraph = hasSql ? sqlPath : efPath;
-                var efRootForGraph = hasEf ? efPath : null;
-
-                if (hasSql && hasEf)
-                {
-                    Console.WriteLine("[SQL/EF] Using SQL root: " + sqlPath + " and EF root: " + efPath);
-                }
-                else if (hasSql)
-                {
-                    Console.WriteLine("[SQL/EF] Using SQL root: " + sqlPath + " (no EF root).");
-                }
-                else
-                {
-                    Console.WriteLine("[SQL/EF] No SQL root provided; running EF-only graph from: " + efPath);
-                }
-
-                RoslynIndexer.Core.Sql.LegacySqlIndexer.Start(
-                    outputDir: tempRoot,
-                    sqlProjectRoot: sqlRootForGraph,
-                    efRoot: efRootForGraph
-                );
-
-                // Verify artifact expected by Python/Vector pipeline
-                var sqlBodies = Directory
-                    .EnumerateFiles(tempRoot, "sql_bodies.jsonl", SearchOption.AllDirectories)
-                    .FirstOrDefault();
-
-                if (sqlBodies == null)
-                    throw new InvalidOperationException(
-                        "[SQL] Expected 'sql_bodies.jsonl' not produced under " + tempRoot +
-                        ". Verify 'paths.sql' or 'paths.ef' point to a valid project root.");
-
-                Console.WriteLine("[SQL] Produced: " + sqlBodies);
-            }
-            else
-            {
-                Console.WriteLine("[SQL/EF] Skipped (no SQL or EF paths).");
-            }
-
+            SqlEfGraphRunner.Run(
+                tempRoot: tempRoot,
+                sqlPath: sqlPath ?? string.Empty,
+                efPath: efPath ?? string.Empty);
 
             // --- 8) Git metadata (adapter) ---
             var git = GitProbe.TryProbe(solutionPath);
-            Console.WriteLine("[GIT] branch=" + (git.Branch ?? "(unknown)") + " head=" + (git.HeadSha ?? "(unknown)"));
+            ConsoleLog.Info("[GIT] branch=" + (git.Branch ?? "(unknown)") + " head=" + (git.HeadSha ?? "(unknown)"));
 
             // --- 9) Extract code chunks + deps and write artifacts ---
             var solution = await loader.LoadSolutionAsync(solutionPath, CancellationToken.None);
@@ -245,37 +210,33 @@ namespace RoslynIndexer.Net48
             // --- 10) ZIP + cleanup (branch-named zip; copy to 'out' if provided, timestamp on collision) ---
             try
             {
-                Console.WriteLine("[ZIP] Target out: " + (outPath ?? "(null)"));
+                ConsoleLog.Info("[ZIP] Target out: " + (outPath ?? "(null)"));
                 var zipPath = ArchiveUtils.CreateZipAndDeleteForBranch(tempRoot, git.Branch, outPath);
-                Console.WriteLine("[ZIP] Created: " + zipPath);
+                ConsoleLog.Info("[ZIP] Created: " + zipPath);
 
                 if (!string.IsNullOrWhiteSpace(outPath))
                 {
                     var outFull = Path.GetFullPath(outPath);
                     var zipFull = Path.GetFullPath(zipPath);
                     if (!zipFull.StartsWith(outFull, StringComparison.OrdinalIgnoreCase))
-                        Console.WriteLine("[ZIP] WARNING: copy to 'out' failed or was skipped; using local archive.");
+                        ConsoleLog.Warn("[ZIP] WARNING: copy to 'out' failed or was skipped; using local archive.");
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine("[ERR] Archiving: " + ex.Message);
+                ConsoleLog.Error("[ERR] Archiving: " + ex.Message);
             }
 
             sw.Stop();
-            Console.WriteLine("[TIME] Total: " + sw.Elapsed);
+            ConsoleLog.Info("[TIME] Total: " + sw.Elapsed);
         }
-
-
 
         // ---------------- MSBuild registration (from config) ----------------
 
-        /// <summary>
-        /// Registers MSBuild strictly from config.msbuild.* values.
-        /// Uses MSBuildExtensionsPath32\Current\Bin. No heuristics, no auto-detection.
-        /// Also wires AssemblyResolve to load Microsoft.Build* and Microsoft.NET.StringTools
-        /// from that directory, while not forcing Microsoft.IO.Redist.
-        /// </summary>
+        // Registers MSBuild strictly from config.msbuild.* values.
+        // Uses MSBuildExtensionsPath32\Current\Bin. No heuristics, no auto-detection.
+        // Also wires AssemblyResolve to load Microsoft.Build* and Microsoft.NET.StringTools
+        // from that directory, while not forcing Microsoft.IO.Redist.
         private static void RegisterMsBuildFromConfig(JObject cfg, string baseDir)
         {
             if (cfg == null)
@@ -290,12 +251,10 @@ namespace RoslynIndexer.Net48
             if (!Directory.Exists(msbExt32))
                 throw new DirectoryNotFoundException("MSBuildExtensionsPath32 not found: " + msbExt32);
 
-            // The Bin folder that contains MSBuild.exe and its assemblies.
             var bin = Path.Combine(msbExt32, "Current", "Bin");
             if (!Directory.Exists(bin))
                 throw new DirectoryNotFoundException("MSBuild 'Current\\Bin' not found under: " + msbExt32);
 
-            // Set environment to match the configured instance.
             Environment.SetEnvironmentVariable("VisualStudioVersion", vsVer);
             Environment.SetEnvironmentVariable("MSBuildExtensionsPath32", msbExt32);
             if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("MSBuildExtensionsPath")))
@@ -303,11 +262,9 @@ namespace RoslynIndexer.Net48
             if (!string.IsNullOrWhiteSpace(vsTools))
                 Environment.SetEnvironmentVariable("VSToolsPath", vsTools);
 
-            // Register this exact MSBuild.
             MSBuildLocator.RegisterMSBuildPath(bin);
-            Console.WriteLine("[MSBuild] Using config instance @ " + bin);
+            ConsoleLog.Info("[MSBuild] Using config instance @ " + bin);
 
-            // Optional: light diagnostics for critical assemblies.
             AppDomain.CurrentDomain.AssemblyLoad += (_, e) =>
             {
                 var n = e.LoadedAssembly.GetName().Name;
@@ -317,12 +274,10 @@ namespace RoslynIndexer.Net48
                 {
                     string loc;
                     try { loc = e.LoadedAssembly.Location; } catch { loc = "(dynamic)"; }
-                    Console.WriteLine("[ASM] " + e.LoadedAssembly.FullName + " <= " + loc);
+                    ConsoleLog.Debug("[ASM] " + e.LoadedAssembly.FullName + " <= " + loc);
                 }
             };
 
-            // Resolve Microsoft.Build* and Microsoft.NET.StringTools from the chosen Bin.
-            // Do NOT force Microsoft.IO.Redist; let the runtime pick the compatible one.
             AppDomain.CurrentDomain.AssemblyResolve += (sender, args) =>
             {
                 var an = new AssemblyName(args.Name);
@@ -346,7 +301,6 @@ namespace RoslynIndexer.Net48
 
         // ---------------- Helpers ----------------
 
-        // Accepts: "--name value", "-name value", "name=value"
         private static Dictionary<string, string> ParseArgs(string[] args)
         {
             var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -396,8 +350,7 @@ namespace RoslynIndexer.Net48
         {
             foreach (var k in keys)
             {
-                string v;
-                if (cli.TryGetValue(k, out v) && !string.IsNullOrWhiteSpace(v))
+                if (cli.TryGetValue(k, out var v) && !string.IsNullOrWhiteSpace(v))
                     return v;
             }
             return null;
@@ -426,9 +379,6 @@ namespace RoslynIndexer.Net48
             return null;
         }
 
-        /// <summary>
-        /// Applies MSBuild-related env vars from config/CLI to mirror the Net9 runner.
-        /// </summary>
         private static void ApplyMsBuildPathOverrides(JObject cfg, Dictionary<string, string> cli, string baseDir)
         {
             var vsVer = FirstNonEmpty(
@@ -477,8 +427,7 @@ namespace RoslynIndexer.Net48
 
         private static string Get(Dictionary<string, string> map, string key)
         {
-            string val;
-            return map.TryGetValue(key, out val) ? val : null;
+            return map.TryGetValue(key, out var val) ? val : null;
         }
     }
 }

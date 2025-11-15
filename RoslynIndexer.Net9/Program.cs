@@ -8,10 +8,11 @@ using Newtonsoft.Json.Linq;
 
 using RoslynIndexer.Core.Abstractions;
 using RoslynIndexer.Core.Helpers;   // GitProbe, ArchiveUtils
+using RoslynIndexer.Core.Logging;   // ConsoleLog
 using RoslynIndexer.Core.Models;
 using RoslynIndexer.Core.Pipeline;
 using RoslynIndexer.Core.Services;  // RepositoryScanner, FileHasher, CSharpAnalyzer, CodeChunkExtractor, ArtifactWriter
-using RoslynIndexer.Core.Sql;       // LegacySqlIndexer
+using RoslynIndexer.Core.Sql;       // LegacySqlIndexer, SqlEfGraphRunner
 using RoslynIndexer.Net9.Adapters;  // MsBuildWorkspaceLoader
 
 internal class Program
@@ -30,12 +31,12 @@ internal class Program
 
             if (vs != null)
             {
-                Console.WriteLine($"[MSBuild] Using {vs.Name} {vs.Version} @ {vs.VisualStudioRootPath}");
+                ConsoleLog.Info($"[MSBuild] Using {vs.Name} {vs.Version} @ {vs.VisualStudioRootPath}");
                 MSBuildLocator.RegisterInstance(vs);
             }
             else
             {
-                Console.WriteLine("[MSBuild] No VS instance found – using RegisterDefaults()");
+                ConsoleLog.Info("[MSBuild] No VS instance found – using RegisterDefaults()");
                 MSBuildLocator.RegisterDefaults();
             }
         }
@@ -64,21 +65,21 @@ internal class Program
                     || cli.ContainsKey("quiet");
         if (quiet) Console.SetOut(TextWriter.Null);
 
-        var cfgPath = cli.GetValueOrDefault("config");
         JObject? cfg = null;
         string? cfgBaseDir = null;
 
+        var cfgPath = cli.GetValueOrDefault("config");
         if (!string.IsNullOrWhiteSpace(cfgPath))
         {
             if (!File.Exists(cfgPath))
                 throw new ArgumentException($"Config file not found: {cfgPath}");
 
             (cfg, cfgBaseDir) = LoadJsonObjectAllowingComments(cfgPath);
-            Console.WriteLine($"[CFG] Loaded: {cfgPath}");
+            ConsoleLog.Info($"[CFG] Loaded: {cfgPath}");
         }
         else
         {
-            Console.WriteLine("[CFG] No config provided. Use --config \"D:\\config.json\"");
+            ConsoleLog.Info("[CFG] No config provided. Use --config \"D:\\\\config.json\"");
         }
 
         // ===============================
@@ -110,11 +111,21 @@ internal class Program
             FromCfg(cfg, "sql", cfgBaseDir, makeAbsolute: true)
         );
 
+        // Explicit migrations root (can be used even without classic EF DbContext)
+        string? migrationsPath = FirstNonEmpty(
+            FromCli(cli, "migrations"),
+            FromCfg(cfg, "paths.migrations", cfgBaseDir, makeAbsolute: true),
+            FromCfg(cfg, "migrations", cfgBaseDir, makeAbsolute: true),
+            Environment.GetEnvironmentVariable("MIGRATIONS_PATH")
+        );
+
+        // EF root used by LegacySqlIndexer (DbContext + migrations or migrations-only)
         string? efPath = FirstNonEmpty(
-            FromCli(cli, "ef"), FromCli(cli, "migrations"),
+            FromCli(cli, "ef"),
             FromCfg(cfg, "paths.ef", cfgBaseDir, makeAbsolute: true),
             FromCfg(cfg, "ef", cfgBaseDir, makeAbsolute: true),
-            Environment.GetEnvironmentVariable("EF_PATH")
+            Environment.GetEnvironmentVariable("EF_PATH"),
+            migrationsPath        // fallback: treat migrations path as EF root
         );
 
         string? inlineSql = FirstNonEmpty(
@@ -124,23 +135,23 @@ internal class Program
         );
 
         string? outDir = FirstNonEmpty(
-             FromCli(cli, "out"),
-             FromCfg(cfg, "paths.out", cfgBaseDir, makeAbsolute: true)
-         );
+            FromCli(cli, "out"),
+            FromCfg(cfg, "paths.out", cfgBaseDir, makeAbsolute: true)
+        );
 
         // ===============================
         // 5) Ustaw MSBuild ścieżki (TransformXml itd.)
-        //     – tylko jeśli podano (CLI/config). Inaczej brak zmian.
         // ===============================
         ApplyMsBuildPathOverrides(cfg, cli, cfgBaseDir);
 
         // Log inputs
-        Console.WriteLine("[IN] solution   = " + solutionPath);
-        Console.WriteLine("[IN] temp-root  = " + tempRoot);
-        Console.WriteLine("[IN] out        = " + (outDir ?? "(null)"));
-        Console.WriteLine("[IN] sql        = " + (sqlPath ?? "(null)"));
-        Console.WriteLine("[IN] ef         = " + (efPath ?? "(null)"));
-        Console.WriteLine("[IN] inline-sql = " + (inlineSql ?? "(null)"));
+        ConsoleLog.Info("[IN] solution   = " + solutionPath);
+        ConsoleLog.Info("[IN] temp-root  = " + tempRoot);
+        ConsoleLog.Info("[IN] out        = " + (outDir ?? "(null)"));
+        ConsoleLog.Info("[IN] sql        = " + (sqlPath ?? "(null)"));
+        ConsoleLog.Info("[IN] ef         = " + (efPath ?? "(null)"));
+        ConsoleLog.Info("[IN] migrations = " + (migrationsPath ?? "(null)"));
+        ConsoleLog.Info("[IN] inline-sql = " + (inlineSql ?? "(null)"));
 
         // Ensure temp dir
         Directory.CreateDirectory(tempRoot);
@@ -160,53 +171,24 @@ internal class Program
         );
 
         var (files, csharp, _) = await pipeline.RunAsync(paths, loader, CancellationToken.None);
-        Console.WriteLine("[Core] Files   : " + files.Count);
-        Console.WriteLine("[Core] Projects: " + csharp.ProjectCount);
-        Console.WriteLine("[Core] Docs    : " + csharp.DocumentCount);
-        Console.WriteLine("[Core] Methods : " + csharp.MethodCount);
+        ConsoleLog.Info("[Core] Files   : " + files.Count);
+        ConsoleLog.Info("[Core] Projects: " + csharp.ProjectCount);
+        ConsoleLog.Info("[Core] Docs    : " + csharp.DocumentCount);
+        ConsoleLog.Info("[Core] Methods : " + csharp.MethodCount);
 
         // ===============================
         // 7) Legacy SQL/EF GRAPH (optional)
         // ===============================
-        var hasSql = !string.IsNullOrWhiteSpace(sqlPath);
-        var hasEf = !string.IsNullOrWhiteSpace(efPath);
-
-        if (hasSql || hasEf)
-        {
-            // If there is no SQL root, fall back to EF root so EF-only projects still produce a graph.
-            var sqlRootForGraph = hasSql ? sqlPath! : efPath!;
-            var efRootForGraph = hasEf ? efPath! : null;
-
-            if (hasSql && hasEf)
-            {
-                Console.WriteLine("[SQL/EF] Using SQL root: " + sqlPath + " and EF root: " + efPath);
-            }
-            else if (hasSql)
-            {
-                Console.WriteLine("[SQL/EF] Using SQL root: " + sqlPath + " (no EF root).");
-            }
-            else
-            {
-                Console.WriteLine("[SQL/EF] No SQL root provided; running EF-only graph from: " + efPath);
-            }
-
-            LegacySqlIndexer.Start(
-                outputDir: tempRoot,
-                sqlProjectRoot: sqlRootForGraph,
-                efRoot: efRootForGraph
-            );
-        }
-        else
-        {
-            Console.WriteLine("[SQL/EF] Skipped (no SQL or EF paths).");
-        }
-
+        SqlEfGraphRunner.Run(
+            tempRoot: tempRoot,
+            sqlPath: sqlPath ?? string.Empty,
+            efPath: efPath ?? string.Empty);
 
         // ===============================
         // 8) Git + chunks/deps → artifacts
         // ===============================
         var git = GitProbe.TryProbe(solutionPath);
-        Console.WriteLine("[GIT] branch=" + (git.Branch ?? "(unknown)") + " head=" + (git.HeadSha ?? "(unknown)"));
+        ConsoleLog.Info("[GIT] branch=" + (git.Branch ?? "(unknown)") + " head=" + (git.HeadSha ?? "(unknown)"));
 
         var solution = await loader.LoadSolutionAsync(solutionPath, CancellationToken.None);
         var extractor = new CodeChunkExtractor();
@@ -241,13 +223,13 @@ internal class Program
         // ===============================
         try
         {
-            Console.WriteLine("[ZIP] Target out: " + (outDir ?? "(null)"));
+            ConsoleLog.Info("[ZIP] Target out: " + (outDir ?? "(null)"));
 
             // nazwij zip jak branch, spakuj bez folderu top-level
             // i skopiuj do 'out' (doklej timestamp przy kolizji)
             var zipPath = ArchiveUtils.CreateZipAndDeleteForBranch(tempRoot, git.Branch, outDir);
 
-            Console.WriteLine("[ZIP] Created: " + zipPath);
+            ConsoleLog.Info("[ZIP] Created: " + zipPath);
 
             // jeżeli kopiowanie do 'out' nie wyszło, daj ostrzeżenie
             if (!string.IsNullOrWhiteSpace(outDir))
@@ -255,12 +237,12 @@ internal class Program
                 var outFull = Path.GetFullPath(outDir);
                 var zipFull = Path.GetFullPath(zipPath);
                 if (!zipFull.StartsWith(outFull, StringComparison.OrdinalIgnoreCase))
-                    Console.WriteLine("[ZIP] WARNING: copy to 'out' failed or was skipped; using local archive.");
+                    ConsoleLog.Warn("[ZIP] WARNING: copy to 'out' failed or was skipped; using local archive.");
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine("[ERR] Archiving: " + ex.Message);
+            ConsoleLog.Error("[ERR] Archiving: " + ex.Message);
         }
 
         // ===============================
@@ -306,7 +288,7 @@ internal class Program
             var token = JToken.ReadFrom(reader, loadSettings);
             var jobj = token as JObject ?? new JObject();
             var baseDir = Path.GetDirectoryName(path)!;
-            Console.WriteLine("[CFG] Root properties: " + string.Join(", ", jobj.Properties().Select(p => p.Name)));
+            ConsoleLog.Info("[CFG] Root properties: " + string.Join(", ", jobj.Properties().Select(p => p.Name)));
             return (jobj, baseDir);
         }
 

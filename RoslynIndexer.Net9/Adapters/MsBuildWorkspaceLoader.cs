@@ -2,6 +2,7 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.MSBuild;
 using RoslynIndexer.Core.Abstractions;
+using RoslynIndexer.Core.Logging;
 
 namespace RoslynIndexer.Net9.Adapters
 {
@@ -34,7 +35,7 @@ namespace RoslynIndexer.Net9.Adapters
                 {
                     if (_open) return;
                     _percent = initialPercent;
-                    Console.Write($"[MSBuild {_percent,3}%] ");
+                    ConsoleLog.Info($"[MSBuild {_percent,3}%] ");
                     _open = true;
                     _col = 0;
                     _needHeaderAfterBreak = false;
