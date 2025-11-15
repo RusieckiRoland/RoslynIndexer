@@ -1,9 +1,11 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using RoslynIndexer.Core.Abstractions;
 using RoslynIndexer.Core.Diagnostics;
+using RoslynIndexer.Core.Logging;
 using RoslynIndexer.Core.Models;
 
 namespace RoslynIndexer.Core.Pipeline
@@ -62,17 +64,17 @@ namespace RoslynIndexer.Core.Pipeline
             progress ??= NullProgressReporter.Instance;
 
             var swTotal = System.Diagnostics.Stopwatch.StartNew();
-            System.Console.WriteLine("[Scan] Root     : " + paths.RepoRoot);
-            System.Console.WriteLine("[Scan] Solution : " + paths.SolutionPath);
-            System.Console.Out.Flush();
+            ConsoleLog.Info("[Scan] Root     : " + paths.RepoRoot);
+            ConsoleLog.Info("[Scan] Solution : " + paths.SolutionPath);
+            ConsoleLog.Flush();
 
             // 1) Enumerate repository files (source, configs, SQL, etc.).
             progress.SetPhase("Scanning repository");
             var swScan = System.Diagnostics.Stopwatch.StartNew();
             var files = new List<IndexItem>(_scanner.EnumerateFiles(paths));
             swScan.Stop();
-            System.Console.WriteLine("[Scan] Files found : " + files.Count + $" (in {swScan.Elapsed})");
-            System.Console.Out.Flush();
+            ConsoleLog.Info("[Scan] Files found : " + files.Count + $" (in {swScan.Elapsed})");
+            ConsoleLog.Flush();
 
             // 2) Compute content hashes for all discovered files unless disabled via INDEXER_NOHASH.
             progress.SetPhase("Hashing files");
@@ -83,7 +85,7 @@ namespace RoslynIndexer.Core.Pipeline
 
             if (skipHash)
             {
-                System.Console.WriteLine("[Hash] SKIPPED (INDEXER_NOHASH=1)");
+                ConsoleLog.Warn("[Hash] SKIPPED (INDEXER_NOHASH=1)");
             }
             else
             {
@@ -107,34 +109,34 @@ namespace RoslynIndexer.Core.Pipeline
                     // Preserve existing console batching behavior for visibility on large repos.
                     if ((i % 500) == 0 || i == total)
                     {
-                        System.Console.WriteLine($"[Hash] {i}/{total}");
-                        System.Console.Out.Flush();
+                        ConsoleLog.Info($"[Hash] {i}/{total}");
+                        ConsoleLog.Flush();
                     }
                 }
 
                 swHash.Stop();
-                System.Console.WriteLine("[Hash] Done in " + swHash.Elapsed);
+                ConsoleLog.Info("[Hash] Done in " + swHash.Elapsed);
             }
 
             // 3) Load and evaluate the solution via the provided workspace loader (design-time, no full build).
             progress.SetPhase("Opening solution");
-            System.Console.WriteLine("[MSBuild] Opening solution...");
-            System.Console.Out.Flush();
+            ConsoleLog.Info("[MSBuild] Opening solution...");
+            ConsoleLog.Flush();
 
             var swOpen = System.Diagnostics.Stopwatch.StartNew();
             var solution = await workspaceLoader.LoadSolutionAsync(paths.SolutionPath, cancellationToken)
                                                 .ConfigureAwait(false);
             swOpen.Stop();
-            System.Console.WriteLine("[MSBuild] Opened in " + swOpen.Elapsed);
-            System.Console.WriteLine("[MSBuild] Projects: " + System.Linq.Enumerable.Count(solution.Projects));
-            System.Console.Out.Flush();
+            ConsoleLog.Info("[MSBuild] Opened in " + swOpen.Elapsed);
+            ConsoleLog.Info("[MSBuild] Projects: " + System.Linq.Enumerable.Count(solution.Projects));
+            ConsoleLog.Flush();
 
             // 4) Analyze C# code using Roslyn (syntax/semantic model per project as needed).
             progress.SetPhase("Analyzing C# (Roslyn)");
             var swCs = System.Diagnostics.Stopwatch.StartNew();
             var csharp = await _csAnalyzer.AnalyzeAsync(solution, cancellationToken).ConfigureAwait(false);
             swCs.Stop();
-            System.Console.WriteLine("[C#] Analysis done in " + swCs.Elapsed);
+            ConsoleLog.Info("[C#] Analysis done in " + swCs.Elapsed);
 
             // 5) Optionally extract SQL artifacts (T-SQL files, EF model graph, etc.).
             progress.SetPhase("Extracting SQL artifacts");
@@ -143,13 +145,13 @@ namespace RoslynIndexer.Core.Pipeline
                 ? new List<SqlArtifact>()
                 : new List<SqlArtifact>(_sqlExtractor.Extract(paths));
             swSql.Stop();
-            System.Console.WriteLine("[SQL] Extracted " + sql.Count + " artifact(s) in " + swSql.Elapsed);
+            ConsoleLog.Info("[SQL] Extracted " + sql.Count + " artifact(s) in " + swSql.Elapsed);
 
             // 6) Finish and report total elapsed time.
             swTotal.Stop();
             progress.SetPhase("Core pipeline done");
-            System.Console.WriteLine("[TIME] Total: " + swTotal.Elapsed);
-            System.Console.Out.Flush();
+            ConsoleLog.Info("[TIME] Total: " + swTotal.Elapsed);
+            ConsoleLog.Flush();
 
             return (files, csharp, sql);
         }

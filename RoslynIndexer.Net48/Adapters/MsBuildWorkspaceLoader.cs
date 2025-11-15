@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.MSBuild;
 using RoslynIndexer.Core.Abstractions;
+using RoslynIndexer.Core.Logging;
 
 namespace RoslynIndexer.Net48.Adapters
 {
@@ -29,8 +30,8 @@ namespace RoslynIndexer.Net48.Adapters
                 {
                     if (_open) return;
                     _percent = initialPercent;
-                    Console.Write($"[MSBuild {_percent,3}%] ");
-                    Console.Out.Flush(); // ensure header is visible immediately
+                    ConsoleLog.Info($"[MSBuild {_percent,3}%] ");
+                    ConsoleLog.Flush(); // ensure header is visible immediately
                     _open = true;
                     _col = 0;
                     _needHeaderAfterBreak = false;
@@ -47,8 +48,8 @@ namespace RoslynIndexer.Net48.Adapters
 
                     if (_needHeaderAfterBreak) return;
 
-                    Console.Write($"\r[MSBuild {_percent,3}%] ");
-                    Console.Out.Flush(); // flush header rewrite
+                    ConsoleLog.Info($"\r[MSBuild {_percent,3}%] ");
+                    ConsoleLog.Flush(); // flush header rewrite
                 }
             }
 
@@ -60,20 +61,20 @@ namespace RoslynIndexer.Net48.Adapters
 
                     if (_needHeaderAfterBreak)
                     {
-                        Console.Write($"[MSBuild {_percent,3}%] ");
-                        Console.Out.Flush();
+                        ConsoleLog.Info($"[MSBuild {_percent,3}%] ");
+                        ConsoleLog.Flush();
                         _needHeaderAfterBreak = false;
                         _col = 0;
                     }
 
-                    Console.Write(".");
-                    Console.Out.Flush(); // flush each dot
+                    ConsoleLog.Info(".");
+                    ConsoleLog.Flush(); // flush each dot
                     _col++;
 
                     if (_col >= Wrap)
                     {
-                        Console.Write($"\r[MSBuild {_percent,3}%] ");
-                        Console.Out.Flush();
+                        ConsoleLog.Info($"\r[MSBuild {_percent,3}%] ");
+                        ConsoleLog.Flush();
                         _col = 0;
                     }
                 }
@@ -86,7 +87,7 @@ namespace RoslynIndexer.Net48.Adapters
                     if (_open)
                     {
                         Console.WriteLine();
-                        Console.Out.Flush(); // make sure the line break renders now
+                        ConsoleLog.Flush(); // make sure the line break renders now
                         _needHeaderAfterBreak = true;
                         _col = 0;
                     }
