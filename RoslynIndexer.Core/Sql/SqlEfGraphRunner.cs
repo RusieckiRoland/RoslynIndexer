@@ -79,7 +79,7 @@ namespace RoslynIndexer.Core.Sql
                     ". Verify 'paths.sql' or 'paths.ef' point to a valid project root.");
             }
 
-            Console.WriteLine("[SQL] Produced: " + sqlBodies);
+            ConsoleLog.Info("[SQL] Produced: " + sqlBodies);
 
             // Enrich graph: add TABLE nodes and regenerate graph.json so the graph is closed.
             try
@@ -88,7 +88,7 @@ namespace RoslynIndexer.Core.Sql
             }
             catch (Exception ex)
             {
-                Console.WriteLine("[SQL] WARNING: failed to enrich SQL graph with TABLE nodes: " + ex.Message);
+                ConsoleLog.Warn("[SQL] WARNING: failed to enrich SQL graph with TABLE nodes: " + ex.Message);
             }
         }
 
@@ -104,7 +104,7 @@ namespace RoslynIndexer.Core.Sql
 
             if (!File.Exists(nodesPath) || !File.Exists(edgesPath))
             {
-                Console.WriteLine("[SQL] Graph CSV files not found – skipping TABLE-node enrichment.");
+                ConsoleLog.Warn("[SQL] Graph CSV files not found – skipping TABLE-node enrichment.");
                 return;
             }
 
@@ -162,11 +162,11 @@ namespace RoslynIndexer.Core.Sql
 
             if (tableNodesToAdd.Count == 0)
             {
-                Console.WriteLine("[SQL] No missing TABLE nodes detected.");
+                ConsoleLog.Warn("[SQL] No missing TABLE nodes detected.");
             }
             else
             {
-                Console.WriteLine("[SQL] Adding " + tableNodesToAdd.Count + " TABLE node(s) to nodes.csv.");
+                ConsoleLog.Info("[SQL] Adding " + tableNodesToAdd.Count + " TABLE node(s) to nodes.csv.");
 
                 foreach (var kvp in tableNodesToAdd)
                 {
@@ -391,8 +391,7 @@ namespace RoslynIndexer.Core.Sql
                 writer.Write("]}");
             }
 
-            Console.WriteLine("[SQL] Regenerated graph.json from CSV (nodes={0}, edges={1}).",
-                nodes.Count, edges.Count);
+            ConsoleLog.Info($"[SQL] Regenerated graph.json from CSV (nodes={nodes.Count}, edges={edges.Count}).")                ;
         }
 
         private static void WriteJsonProp(StreamWriter writer, string name, string value, bool appendComma)

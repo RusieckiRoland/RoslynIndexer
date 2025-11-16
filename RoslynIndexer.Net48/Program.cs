@@ -94,19 +94,14 @@ namespace RoslynIndexer.Net48
             if (string.IsNullOrWhiteSpace(tempRoot))
                 throw new ArgumentException("Missing --temp-root or config['paths.tempRoot'].");
 
+            // --- SQL root (opcjonalne) ---
             string sqlPath = FirstNonEmpty(
                 FromCli(cli, "sql"),
                 FromCfg(cfg, "paths.sql", cfgBaseDir, true),
                 FromCfg(cfg, "sql", cfgBaseDir, true)
             );
 
-            string efPath = FirstNonEmpty(
-                FromCli(cli, "ef"), FromCli(cli, "migrations"),
-                FromCfg(cfg, "paths.ef", cfgBaseDir, true),
-                FromCfg(cfg, "ef", cfgBaseDir, true),
-                Environment.GetEnvironmentVariable("EF_PATH")
-            );
-
+            // --- EF migrations root (jak w Net9: paths.migrations / migrations / env) ---
             string efMigrationsPath = FirstNonEmpty(
                 FromCli(cli, "migrations"),
                 FromCfg(cfg, "paths.migrations", cfgBaseDir, true),
@@ -114,12 +109,23 @@ namespace RoslynIndexer.Net48
                 Environment.GetEnvironmentVariable("MIGRATIONS_PATH")
             );
 
+            // --- EF root (jak w Net9: paths.ef / ef / env / FALLBACK na efMigrationsPath) ---
+            string efPath = FirstNonEmpty(
+                FromCli(cli, "ef"),
+                FromCfg(cfg, "paths.ef", cfgBaseDir, true),
+                FromCfg(cfg, "ef", cfgBaseDir, true),
+                Environment.GetEnvironmentVariable("EF_PATH"),
+                efMigrationsPath   // <== KLUCZOWY FALLBACK, jak w Net9
+            );
+
+            // --- inline-sql (opcjonalne) ---
             string inlineSql = FirstNonEmpty(
                 FromCli(cli, "inline-sql"),
                 FromCfg(cfg, "paths.inlineSql", cfgBaseDir, true),
                 FromCfg(cfg, "inlineSql", cfgBaseDir, true)
             );
 
+            // --- out (opcjonalne) ---
             string outPath = FirstNonEmpty(
                 FromCli(cli, "out"),
                 FromCfg(cfg, "paths.out", cfgBaseDir, true)

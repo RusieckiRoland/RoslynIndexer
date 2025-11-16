@@ -57,7 +57,7 @@ namespace RoslynIndexer.Net9.Adapters
                     if (_needHeaderAfterBreak) return;
 
                     // Normal in-line header update (carriage return to overwrite the same line).
-                    Console.Write($"\r[MSBuild {_percent,3}%] ");
+                    ConsoleLog.InfoLine($"\r[MSBuild {_percent,3}%] ",_percent);
                 }
             }
 
