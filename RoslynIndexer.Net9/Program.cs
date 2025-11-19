@@ -76,11 +76,26 @@ internal class Program
 
             (cfg, cfgBaseDir) = LoadJsonObjectAllowingComments(cfgPath);
             ConsoleLog.Info($"[CFG] Loaded: {cfgPath}");
+
+            // ⬇️ TU: wstrzyknięcie dbGraph z GŁÓWNEGO config.json do LegacySqlIndexer
+            try
+            {
+                LegacySqlIndexer.GlobalDbGraphConfig =
+                    cfg is not null ? DbGraphConfig.FromJson(cfg) : DbGraphConfig.Empty;
+            }
+            catch (Exception ex)
+            {
+                ConsoleLog.Warn("[dbGraph] Failed to parse dbGraph from main config.json: " + ex.Message);
+                LegacySqlIndexer.GlobalDbGraphConfig = DbGraphConfig.Empty;
+            }
         }
         else
         {
             ConsoleLog.Info("[CFG] No config provided. Use --config \"D:\\\\config.json\"");
+            // brak configa → brak dbGraph
+            LegacySqlIndexer.GlobalDbGraphConfig = DbGraphConfig.Empty;
         }
+
 
         // ===============================
         // 4) Resolve inputs (CLI -> cfg.paths -> cfg.* -> ENV)

@@ -4,6 +4,7 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.SqlServer.TransactSql.ScriptDom;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using RoslynIndexer.Core.Logging;
 using RoslynIndexer.Core.Sql.EfMigrations;
 using System;
@@ -23,6 +24,9 @@ namespace RoslynIndexer.Core.Sql
     /// </summary>
     public static class LegacySqlIndexer
     {
+        // Global dbGraph settings injected once from the main config.json (CLI layer).
+        public static DbGraphConfig GlobalDbGraphConfig { get; set; } = DbGraphConfig.Empty;
+
         // ====== data rows (classes instead of records) ======
         private sealed class NodeRow
         {
@@ -675,27 +679,44 @@ namespace RoslynIndexer.Core.Sql
                 .ToList();
         }
 
+
         private static void AppendEfEdgesAndNodes(
             IEnumerable<string> codeRoots,
             string outDir,
             ConcurrentDictionary<string, NodeRow> nodes,
             List<EdgeRow> edges)
         {
-            ConsoleLog.Info("EF stage: scanning C# files (mappings, DbSet, raw SQL)...");
+            ConsoleLog.Info("EF stage: scanning C# files (mappings, DbSet, raw SQL, POCO entities).");
+
             var csFiles = codeRoots
                 .SelectMany(r => Directory.EnumerateFiles(r, "*.cs", SearchOption.AllDirectories))
                 .ToArray();
 
-            ConsoleLog.Info("C# files found: " + csFiles.Length);
+            ConsoleLog.Info($"C# files found: {csFiles.Length}");
 
             var trees = new List<SyntaxTree>();
             foreach (var f in csFiles)
                 trees.Add(CSharpSyntaxTree.ParseText(File.ReadAllText(f), path: f));
 
-            // 1) entity -> (schema, table)
+            // 1) entity -> (schema, table) from EF mappings (if any)
             var entityMap = ExtractEntityMappings(trees);
+            ConsoleLog.Info($"[EF] entityMap entries: {entityMap.Count}");
 
-            // 2) DbSet<T> -> TABLE (MapsTo)
+            // 1a) TABLE nodes from previous SQL stage (if any)
+            var tableNodes = nodes.Values
+                .Where(n => string.Equals(n.Kind, "TABLE", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            ConsoleLog.Info($"[EF] TABLE nodes available before EF stage: {tableNodes.Count}");
+
+            // 2) dbGraph settings come ONLY from GlobalDbGraphConfig (set by CLI from main config.json)
+            var dbGraphCfg = GlobalDbGraphConfig ?? DbGraphConfig.Empty;
+
+            if (dbGraphCfg.HasEntityBaseTypes)
+                ConsoleLog.Info($"[dbGraph] entityBaseTypes: {string.Join(", ", dbGraphCfg.EntityBaseTypes)}");
+            else
+                ConsoleLog.Info("[dbGraph] entityBaseTypes: <none> (POCO detection off)");
+
+            // 3) Classic DbSet<T> -> TABLE (MapsTo) using entityMap only
             foreach (var t in trees)
             {
                 var root = t.GetRoot();
@@ -713,10 +734,11 @@ namespace RoslynIndexer.Core.Sql
                     var clsDecl = prop.FirstAncestorOrSelf<ClassDeclarationSyntax>();
                     var cls = clsDecl != null ? clsDecl.Identifier.Text : "UnknownClass";
                     var from = "csharp:" + cls + "." + prop.Identifier.Text + "|DBSET";
+                    var toKey = map.Item1 + "." + map.Item2 + "|TABLE";
 
                     edges.Add(new EdgeRow(
                         from,
-                        map.Item1 + "." + map.Item2 + "|TABLE",
+                        toKey,
                         "MapsTo",
                         "TABLE",
                         t.FilePath,
@@ -728,60 +750,190 @@ namespace RoslynIndexer.Core.Sql
                 }
             }
 
-            // 3) Raw SQL calls
-            var parser = new TSql150Parser(true);
-            foreach (var t in trees)
+            // 4) entityBaseTypes detection -> ENTITY (+ optional MapsTo TABLE)
+            // Encja powstaje ZAWSZE, jeśli dziedziczy po typie z configu.
+            // Mapowanie do TABLE jest "best effort": jeśli znajdziemy tabelę, dokładamy edge.
+            if (dbGraphCfg.HasEntityBaseTypes)
             {
-                var root = t.GetRoot();
-                foreach (var inv in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
+                foreach (var t in trees)
                 {
-                    var call = inv.Expression.ToString();
-                    if (!(call.Contains("SqlQuery") || call.Contains("ExecuteSql") || call.Contains("FromSql")))
-                        continue;
-
-                    var lit = inv.ArgumentList != null && inv.ArgumentList.Arguments.Count > 0
-                        ? inv.ArgumentList.Arguments[0].Expression as LiteralExpressionSyntax
-                        : null;
-
-                    if (lit == null || !lit.IsKind(SyntaxKind.StringLiteralExpression))
-                        continue;
-
-                    var sql = lit.Token.ValueText;
-
-                    try
+                    var root = t.GetRoot();
+                    foreach (var cls in root.DescendantNodes().OfType<ClassDeclarationSyntax>())
                     {
-                        IList<ParseError> errors;
-                        var frag = parser.Parse(new StringReader(sql), out errors);
-                        var col = new MiniSqlRefCollector();
-                        frag.Accept(col);
+                        var baseTypeSyntax = cls.BaseList?.Types.FirstOrDefault();
+                        if (baseTypeSyntax == null)
+                            continue;
 
-                        var methodDecl = inv.FirstAncestorOrSelf<MethodDeclarationSyntax>();
-                        var method = methodDecl != null ? methodDecl.Identifier.Text : "UnknownMethod";
-                        var clsDecl = inv.FirstAncestorOrSelf<ClassDeclarationSyntax>();
-                        var cls = clsDecl != null ? clsDecl.Identifier.Text : "UnknownClass";
-                        var from = "csharp:" + cls + "." + method + "|METHOD";
+                        var baseTypeText = baseTypeSyntax.ToString();
+                        if (string.IsNullOrWhiteSpace(baseTypeText))
+                            continue;
 
-                        nodes.TryAdd(
-                            from,
-                            new NodeRow(from, "METHOD", method, "csharp", t.FilePath, null, "code", null));
+                        var baseTypeSimple = baseTypeText.Split('.').Last();
 
-                        foreach (var r in col.Refs)
+                        Console.WriteLine($"[ENTITY-DEBUG] Class='{cls.Identifier.Text}', BaseSyntax='{baseTypeText}'");
+
+                        bool matchesBase = dbGraphCfg.EntityBaseTypes.Any(cfgType =>
                         {
-                            var to = r.Item1 + "." + r.Item2 + "|" + r.Item3;
-                            edges.Add(new EdgeRow(from, to, r.Item4, r.Item3, t.FilePath, null));
+                            if (string.IsNullOrWhiteSpace(cfgType))
+                                return false;
+
+                            var cfgSimple = cfgType.Split('.').Last();
+
+                            return string.Equals(baseTypeText, cfgType, StringComparison.Ordinal)
+                                   || string.Equals(baseTypeText, cfgSimple, StringComparison.Ordinal)
+                                   || string.Equals(baseTypeSimple, cfgSimple, StringComparison.Ordinal);
+                        });
+
+                        if (!matchesBase)
+                        {
+                            Console.WriteLine($"[ENTITY-DEBUG]   -> Base DOES NOT match config for '{cls.Identifier.Text}' (base='{baseTypeText}')");
+                            continue;
                         }
-                    }
-                    catch
-                    {
-                        // intentionally swallow SQL parsing issues in raw strings
+
+                        Console.WriteLine($"[ENTITY-DEBUG]   -> Base MATCHES config for '{cls.Identifier.Text}' (base='{baseTypeText}')");
+
+                        var entityName = cls.Identifier.Text;
+                        var entityKey = $"csharp:{entityName}|ENTITY";
+
+                        // 4a) ZAWSZE dodajemy ENTITY node
+                        nodes.TryAdd(
+                            entityKey,
+                            new NodeRow(
+                                entityKey,
+                                "ENTITY",
+                                entityName,
+                                "csharp",
+                                t.FilePath,
+                                null,
+                                "code",
+                                null));
+
+                        Console.WriteLine($"[ENTITY-DEBUG]   -> ENTITY node added for '{entityName}' ({entityKey})");
+
+                        // 4b) Best-effort: spróbuj znaleźć / utworzyć TABLE, żeby dodać MapsTo
+                        bool mapFound = false;
+                        string schema = "dbo";  // default EF schema
+                        string tableName = entityName;
+
+                        // 4b.1: entityMap (Fluent / EF mappings)
+                        if (entityMap.TryGetValue(entityName, out var map))
+                        {
+                            schema = map.Item1;
+                            tableName = map.Item2;
+                            mapFound = true;
+                            Console.WriteLine($"[ENTITY-DEBUG]   -> Using entityMap direct for '{entityName}': {schema}.{tableName}");
+                        }
+                        else
+                        {
+                            var foundKey = entityMap.Keys.FirstOrDefault(k =>
+                                string.Equals(k, entityName, StringComparison.OrdinalIgnoreCase) ||
+                                string.Equals(k, entityName + "s", StringComparison.OrdinalIgnoreCase) ||
+                                string.Equals(k + "s", entityName, StringComparison.OrdinalIgnoreCase));
+
+                            if (foundKey != null)
+                            {
+                                var m = entityMap[foundKey];
+                                schema = m.Item1;
+                                tableName = m.Item2;
+                                mapFound = true;
+                                Console.WriteLine($"[ENTITY-DEBUG]   -> Using entityMap heuristic for '{entityName}': key='{foundKey}', table={schema}.{tableName}");
+                            }
+                        }
+
+                        // 4b.2: [Table] attribute on the class
+                        if (!mapFound)
+                        {
+                            var tableAttr = cls.AttributeLists
+                                .SelectMany(al => al.Attributes)
+                                .FirstOrDefault(a =>
+                                {
+                                    var n = a.Name.ToString();
+                                    return n == "Table"
+                                           || n == "TableAttribute"
+                                           || n.EndsWith(".Table")
+                                           || n.EndsWith(".TableAttribute");
+                                });
+
+                            if (tableAttr != null && tableAttr.ArgumentList != null)
+                            {
+                                foreach (var arg in tableAttr.ArgumentList.Arguments)
+                                {
+                                    // Positional: table name
+                                    if (arg.NameEquals == null &&
+                                        arg.Expression is LiteralExpressionSyntax lit &&
+                                        lit.IsKind(SyntaxKind.StringLiteralExpression))
+                                    {
+                                        tableName = lit.Token.ValueText;
+                                    }
+                                    // Named: Schema = "..."
+                                    else if (arg.NameEquals != null &&
+                                             arg.NameEquals.Name.Identifier.Text == "Schema" &&
+                                             arg.Expression is LiteralExpressionSyntax schemaLit &&
+                                             schemaLit.IsKind(SyntaxKind.StringLiteralExpression))
+                                    {
+                                        schema = schemaLit.Token.ValueText;
+                                    }
+                                }
+
+                                mapFound = true;
+                                Console.WriteLine($"[ENTITY-DEBUG]   -> Using [Table] attribute for '{entityName}': {schema}.{tableName}");
+                            }
+                        }
+
+                        // 4b.3: fallback – istniejące TABLE z SQL (jeśli są)
+                        if (!mapFound && tableNodes.Count > 0)
+                        {
+                            var tableNode = tableNodes.FirstOrDefault(n =>
+                                string.Equals(n.Name, entityName, StringComparison.OrdinalIgnoreCase) ||
+                                string.Equals(n.Name, entityName + "s", StringComparison.OrdinalIgnoreCase) ||
+                                string.Equals(n.Name + "s", entityName, StringComparison.OrdinalIgnoreCase));
+
+                            if (tableNode != null)
+                            {
+                                schema = string.IsNullOrEmpty(tableNode.Schema) ? "dbo" : tableNode.Schema;
+                                tableName = tableNode.Name;
+                                mapFound = true;
+                                Console.WriteLine($"[ENTITY-DEBUG]   -> Using TABLE node fallback for '{entityName}': {schema}.{tableName}");
+                            }
+                        }
+
+                        // 4c) Jeśli mimo wszystko nie ma TABLE – zostawiamy samą ENTITY
+                        if (!mapFound)
+                        {
+                            Console.WriteLine($"[ENTITY-DEBUG]   -> NO TABLE mapping for '{entityName}' – ENTITY without MapsTo.");
+                            continue;
+                        }
+
+                        var tableKey = $"{schema}.{tableName}|TABLE";
+
+                        // Upewniamy się, że TABLE node istnieje (jeśli już był z SQL – TryAdd pozostawi istniejący).
+                        nodes.TryAdd(
+                            tableKey,
+                            new NodeRow(
+                                tableKey,
+                                "TABLE",
+                                tableName,
+                                schema,
+                                t.FilePath,
+                                null,
+                                "ef",
+                                null));
+
+                        edges.Add(new EdgeRow(
+                            entityKey,
+                            tableKey,
+                            "MapsTo",
+                            "TABLE",
+                            t.FilePath,
+                            null));
+
+                        Console.WriteLine($"[ENTITY-DEBUG]   -> ENTITY + MapsTo added for '{entityName}' => {tableKey}");
                     }
                 }
             }
-
-            ConsoleLog.Info("EF stage finished: nodes(csharp)~" +
-                 nodes.Count(kv => kv.Key.StartsWith("csharp:", StringComparison.OrdinalIgnoreCase)) +
-                 ", edges total=" + edges.Count);
         }
+
+
 
         private static void AppendEfMigrationEdgesAndNodes(
             IEnumerable<string> codeRoots,
