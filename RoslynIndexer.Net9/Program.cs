@@ -154,6 +154,10 @@ internal class Program
             FromCfg(cfg, "paths.out", cfgBaseDir, makeAbsolute: true)
         );
 
+        LegacySqlIndexer.GlobalEfMigrationRoots =   !string.IsNullOrWhiteSpace(migrationsPath)
+        ? new[] { migrationsPath }
+        : Array.Empty<string>();
+
         // ===============================
         // 5) Ustaw MSBuild ścieżki (TransformXml itd.)
         // ===============================
@@ -190,6 +194,14 @@ internal class Program
         ConsoleLog.Info("[Core] Projects: " + csharp.ProjectCount);
         ConsoleLog.Info("[Core] Docs    : " + csharp.DocumentCount);
         ConsoleLog.Info("[Core] Methods : " + csharp.MethodCount);
+
+        // migrations-only fallback: if there is no explicit EF root but migrations are configured,
+        // treat migrationsPath as EF root so that SQL/EF runner has a code root for C# scanning.
+        if (string.IsNullOrWhiteSpace(efPath) && !string.IsNullOrWhiteSpace(migrationsPath))
+        {
+            efPath = migrationsPath;
+        }
+
 
         // ===============================
         // 7) Legacy SQL/EF GRAPH (optional)

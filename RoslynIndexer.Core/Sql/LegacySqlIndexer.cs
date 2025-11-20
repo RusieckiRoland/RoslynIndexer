@@ -27,6 +27,10 @@ namespace RoslynIndexer.Core.Sql
         // Global dbGraph settings injected once from the main config.json (CLI layer).
         public static DbGraphConfig GlobalDbGraphConfig { get; set; } = DbGraphConfig.Empty;
 
+        // Global migrations roots (optional) injected from the main config.json (CLI / Program layer).
+        // When empty, AppendEfMigrationEdgesAndNodes falls back to codeRoots (legacy behaviour).
+        public static string[] GlobalEfMigrationRoots { get; set; } = Array.Empty<string>();
+
         // ====== data rows (classes instead of records) ======
         private sealed class NodeRow
         {
@@ -79,6 +83,30 @@ namespace RoslynIndexer.Core.Sql
         {
             try
             {
+                // Optional: load dbGraph config when LegacySqlIndexer is used directly
+                // (e.g. in EntityBaseTypesTests). In CLI mode Program.Net9 already
+                // sets GlobalDbGraphConfig from the main config.json – a separate
+                // config.json in outputDir simply nie istnieje, więc niczego tu nie nadpiszemy.
+                try
+                {
+                    var configPath = Path.Combine(outputDir, "config.json");
+                    if (File.Exists(configPath))
+                    {
+                        var json = File.ReadAllText(configPath);
+                        if (!string.IsNullOrWhiteSpace(json))
+                        {
+                            var root = JObject.Parse(json);
+                            GlobalDbGraphConfig = DbGraphConfig.FromJson(root);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Best-effort: brak lub zły config.json w outputDir nie może
+                    // zabić całego procesu – po prostu zostajemy przy Empty.
+                    ConsoleLog.Warn("[dbGraph] Failed to load dbGraph config from outputDir: " + ex.Message);
+                }
+
                 return RunBuild(outputDir, sqlProjectRoot, efRoot);
             }
             catch (Exception ex)
@@ -439,6 +467,139 @@ namespace RoslynIndexer.Core.Sql
             return Tuple.Create("dbo", parts[parts.Length - 1]);
         }
 
+        private static List<string> AutoDiscoverCodeRoots(string sqlRoot)
+        {
+            var results = new List<string>();
+
+            DirectoryInfo parent;
+            try
+            {
+                parent = Directory.GetParent(sqlRoot);
+            }
+            catch (Exception ex) when (ex is ArgumentException || ex is PathTooLongException)
+            {
+                ConsoleLog.Warn("AutoDiscoverCodeRoots: invalid sqlRoot '" + sqlRoot + "': " + ex.Message);
+                return results;
+            }
+
+            if (parent == null)
+                return results;
+
+            var p2 = parent.Parent ?? parent;
+            var p3 = p2.Parent ?? p2;
+            var src = p3.FullName;
+
+            var preferred = Path.Combine(src, "Server", "DataAccess");
+            var bases = Directory.Exists(preferred)
+                ? new[] { preferred }
+                : new[] { src };
+
+            string[] excludes = { "test", "tests", "example", "examples", "sample", "samples", "dev", "client", "tools" };
+
+            bool IsExcluded(string path) =>
+                path.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+                        StringSplitOptions.RemoveEmptyEntries)
+                    .Any(seg => excludes.Any(x =>
+                        string.Equals(seg, x, StringComparison.OrdinalIgnoreCase)));
+
+            string[] csproj;
+            try
+            {
+                csproj = bases
+                    .Where(Directory.Exists)
+                    .SelectMany(b => Directory.EnumerateFiles(b, "*.csproj", SearchOption.AllDirectories))
+                    .Where(p => p.IndexOf("\\bin\\", StringComparison.OrdinalIgnoreCase) < 0 &&
+                                p.IndexOf("/bin/", StringComparison.OrdinalIgnoreCase) < 0 &&
+                                p.IndexOf("\\obj\\", StringComparison.OrdinalIgnoreCase) < 0 &&
+                                p.IndexOf("/obj/", StringComparison.OrdinalIgnoreCase) < 0)
+                    .Where(p => !IsExcluded(p))
+                    .ToArray();
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                ConsoleLog.Warn("AutoDiscoverCodeRoots: unauthorized while enumerating *.csproj under "
+                    + string.Join(";", bases) + ": " + ex.Message);
+                csproj = Array.Empty<string>();
+            }
+            catch (IOException ex)
+            {
+                ConsoleLog.Warn("AutoDiscoverCodeRoots: IO error while enumerating *.csproj under "
+                    + string.Join(";", bases) + ": " + ex.Message);
+                csproj = Array.Empty<string>();
+            }
+
+            bool LooksLikeEfDir(string dir)
+            {
+                string[] files;
+                try
+                {
+                    files = Directory
+                        .EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories)
+                        .Take(300)
+                        .ToArray();
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    ConsoleLog.Warn("AutoDiscoverCodeRoots: unauthorized while enumerating *.cs under " + dir + ": " + ex.Message);
+                    return false;
+                }
+                catch (IOException ex)
+                {
+                    ConsoleLog.Warn("AutoDiscoverCodeRoots: IO error while enumerating *.cs under " + dir + ": " + ex.Message);
+                    return false;
+                }
+
+                foreach (var f in files)
+                {
+                    string txt;
+                    try
+                    {
+                        txt = File.ReadAllText(f);
+                    }
+                    catch (UnauthorizedAccessException ex)
+                    {
+                        ConsoleLog.Warn("AutoDiscoverCodeRoots: unauthorized while reading " + f + ": " + ex.Message);
+                        continue;
+                    }
+                    catch (IOException ex)
+                    {
+                        ConsoleLog.Warn("AutoDiscoverCodeRoots: IO error while reading " + f + ": " + ex.Message);
+                        continue;
+                    }
+
+                    if (Regex.IsMatch(txt, @"class\s+\w+\s*:\s*(\w+\.)*(Identity)?DbContext\b"))
+                        return true;
+
+                    if (txt.Contains(" DbSet<") || txt.Contains("\tDbSet<"))
+                        return true;
+                }
+
+                return false;
+            }
+
+            foreach (var proj in csproj)
+            {
+                var dir = Path.GetDirectoryName(proj);
+                if (string.IsNullOrEmpty(dir))
+                    continue;
+
+                try
+                {
+                    if (LooksLikeEfDir(dir))
+                        results.Add(dir);
+                }
+                catch (Exception ex) when (ex is UnauthorizedAccessException || ex is IOException)
+                {
+                    ConsoleLog.Warn("AutoDiscoverCodeRoots: error while scanning directory " + dir + ": " + ex.Message);
+                }
+            }
+
+            return results;
+        }
+
+
+ 
+
         private static string NameKey(SchemaObjectName n)
         {
             var db = n.DatabaseIdentifier != null ? n.DatabaseIdentifier.Value : null;
@@ -607,77 +768,7 @@ namespace RoslynIndexer.Core.Sql
             }
         }
 
-        // ========================================================
-        //  EF bridge (auto-discovery + edges)
-        // ========================================================
-        private static List<string> AutoDiscoverCodeRoots(string sqlRoot)
-        {
-            var results = new List<string>();
-            var parent = Directory.GetParent(sqlRoot);
-            if (parent == null) return results;
-
-            var p2 = parent.Parent != null ? parent.Parent : parent;
-            var p3 = p2.Parent != null ? p2.Parent : p2;
-            var src = p3.FullName;
-
-            var preferred = Path.Combine(src, "Server", "DataAccess");
-            var bases = Directory.Exists(preferred)
-                ? new[] { preferred }
-                : new[] { src };
-
-            string[] excludes = { "test", "tests", "example", "examples", "sample", "samples", "dev", "client", "tools" };
-
-            bool IsExcluded(string path) =>
-                path.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
-                        StringSplitOptions.RemoveEmptyEntries)
-                    .Any(seg => excludes.Any(x =>
-                        string.Equals(seg, x, StringComparison.OrdinalIgnoreCase)));
-
-            var csproj = bases
-                .SelectMany(b => Directory.EnumerateFiles(b, "*.csproj", SearchOption.AllDirectories))
-                .Where(p => p.IndexOf("\\bin\\", StringComparison.OrdinalIgnoreCase) < 0 &&
-                            p.IndexOf("/bin/", StringComparison.OrdinalIgnoreCase) < 0 &&
-                            p.IndexOf("\\obj\\", StringComparison.OrdinalIgnoreCase) < 0 &&
-                            p.IndexOf("/obj/", StringComparison.OrdinalIgnoreCase) < 0)
-                .Where(p => !IsExcluded(p))
-                .ToArray();
-
-            bool LooksLikeEfDir(string dir)
-            {
-                foreach (var f in Directory.EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories).Take(300))
-                {
-                    var txt = File.ReadAllText(f);
-                    if (Regex.IsMatch(txt, @"class\s+\w+\s*:\s*(\w+\.)*(Identity)?DbContext\b"))
-                        return true;
-                    if (txt.Contains(" DbSet<") || txt.Contains("\tDbSet<"))
-                        return true;
-                }
-                return false;
-            }
-
-            foreach (var proj in csproj)
-            {
-                var dir = Path.GetDirectoryName(proj);
-                if (dir != null && LooksLikeEfDir(dir))
-                    results.Add(dir);
-            }
-
-            // dedupe: keep top-most dirs
-            results = results
-                .OrderBy(p => p.Length)
-                .Aggregate(new List<string>(), (acc, p) =>
-                {
-                    if (!acc.Any(a =>
-                            p.StartsWith(a + Path.DirectorySeparatorChar,
-                                StringComparison.OrdinalIgnoreCase)))
-                        acc.Add(p);
-                    return acc;
-                });
-
-            return results
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-        }
+       
 
 
         private static void AppendEfEdgesAndNodes(
@@ -933,107 +1024,272 @@ namespace RoslynIndexer.Core.Sql
             }
         }
 
-
-
         private static void AppendEfMigrationEdgesAndNodes(
-            IEnumerable<string> codeRoots,
-            string outDir,
-            ConcurrentDictionary<string, NodeRow> nodes,
-            List<EdgeRow> edges)
+         IEnumerable<string> codeRoots,
+         string outDir,
+         ConcurrentDictionary<string, NodeRow> nodes,
+         List<EdgeRow> edges)
         {
             ConsoleLog.Info("EF-Migrations (v2): Roslyn-based EfMigrationAnalyzer…");
+
+            // 1) Collect all roots to scan:
+            //    - explicit GlobalEfMigrationRoots from config.json,
+            //    - plus codeRoots (for backward compatibility), without duplicates.
+            var effectiveRoots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            if (GlobalEfMigrationRoots != null)
+            {
+                foreach (var raw in GlobalEfMigrationRoots)
+                {
+                    if (string.IsNullOrWhiteSpace(raw))
+                        continue;
+
+                    var dir = NormalizeDir(raw);
+                    if (!Directory.Exists(dir))
+                    {
+                        ConsoleLog.Warn("EF-Migrations: directory from GlobalEfMigrationRoots does not exist: " + dir);
+                        continue;
+                    }
+
+                    effectiveRoots.Add(dir);
+                }
+            }
+
+            var codeRootsArray = (codeRoots ?? Array.Empty<string>()).ToArray();
+
+            if (effectiveRoots.Count == 0)
+            {
+                // No explicit config – fall back to legacy behaviour: scan codeRoots only.
+                foreach (var raw in codeRootsArray)
+                {
+                    if (string.IsNullOrWhiteSpace(raw))
+                        continue;
+
+                    var dir = NormalizeDir(raw);
+                    if (!Directory.Exists(dir))
+                    {
+                        ConsoleLog.Warn("EF-Migrations: directory does not exist: " + dir);
+                        continue;
+                    }
+
+                    effectiveRoots.Add(dir);
+                }
+            }
+            else
+            {
+                // We *do* have explicit migration roots – still allow migrations living next to codeRoots.
+                foreach (var raw in codeRootsArray)
+                {
+                    if (string.IsNullOrWhiteSpace(raw))
+                        continue;
+
+                    var dir = NormalizeDir(raw);
+                    if (Directory.Exists(dir))
+                        effectiveRoots.Add(dir);
+                }
+            }
+
+            if (effectiveRoots.Count == 0)
+            {
+                ConsoleLog.Info("EF-Migrations (v2): no migration roots configured/found – skipped.");
+                return;
+            }
 
             var analyzer = new EfMigrationAnalyzer();
             int addedMigrations = 0;
             int addedEdges = 0;
 
-            foreach (var root in codeRoots)
+            // 2) Primary path: use EfMigrationAnalyzer (for real projects like nopCommerce).
+            foreach (var root in effectiveRoots)
             {
-                if (string.IsNullOrWhiteSpace(root))
-                    continue;
-
-                if (!Directory.Exists(root))
+                try
                 {
-                    ConsoleLog.Warn("EF-Migrations: directory does not exist: " + root);
-                    continue;
-                }
-
-                // For production we do not rely on repoRoot for now – we keep full paths,
-                // just like other parts of LegacySqlIndexer (SQL nodes use absolute paths as well).
-                var infos = analyzer.Analyze(root, repoRoot: string.Empty, cancellationToken: CancellationToken.None);
-                if (infos == null || infos.Count == 0)
-                    continue;
-
-                foreach (var mig in infos)
-                {
-                    if (mig == null || string.IsNullOrEmpty(mig.ClassName))
+                    var infos = analyzer.Analyze(root, repoRoot: string.Empty, cancellationToken: CancellationToken.None);
+                    if (infos == null || infos.Count == 0)
                         continue;
 
-                    var key = "csharp:" + mig.ClassName + "|MIGRATION";
-
-                    // Migration node (MIGRATION → one per migration class)
-                    nodes.TryAdd(
-                        key,
-                        new NodeRow(
-                            key: key,
-                            kind: "MIGRATION",
-                            name: mig.ClassName,
-                            schema: "csharp",
-                            file: mig.FileRelativePath ?? string.Empty,
-                            batch: null,
-                            domain: "code",
-                            bodyPath: null));
-
-                    addedMigrations++;
-
-                    // Edges: we only use UpOperations for graph (schema evolution "forward")
-                    foreach (var op in mig.UpOperations ?? Array.Empty<EfMigrationOperation>())
+                    foreach (var mig in infos)
                     {
-                        // For now we treat all table/index operations as schema changes.
-                        // Data-change semantics or more fine-grained relations can be added later
-                        // once we extend EfMigrationAnalyzer to extract them.
-                        string relation;
-                        switch (op.Kind)
-                        {
-                            case EfMigrationOperationKind.CreateTable:
-                            case EfMigrationOperationKind.DropTable:
-                            case EfMigrationOperationKind.CreateIndex:
-                            case EfMigrationOperationKind.DropIndex:
-                            case EfMigrationOperationKind.TouchTable:
-                                relation = "SchemaChange";
-                                break;
-
-                            case EfMigrationOperationKind.RawSql:
-                            case EfMigrationOperationKind.Unknown:
-                            default:
-                                // Raw SQL is preserved inside EfMigrationInfo.Raw but we do not
-                                // try to guess affected tables here. This keeps the graph safe.
-                                continue;
-                        }
-
-                        var tableName = op.Table;
-                        if (string.IsNullOrWhiteSpace(tableName))
+                        if (mig == null || string.IsNullOrEmpty(mig.ClassName))
                             continue;
 
-                        // We default to dbo schema – SQL side (or other analyzers) may refine this later.
-                        var toKey = "dbo." + tableName + "|TABLE";
+                        var key = "csharp:" + mig.ClassName + "|MIGRATION";
 
-                        edges.Add(new EdgeRow(
-                            from: key,
-                            to: toKey,
-                            relation: relation,
-                            toKind: "TABLE",
-                            file: mig.FileRelativePath ?? string.Empty,
-                            batch: null));
+                        // Migration node
+                        nodes.TryAdd(
+                            key,
+                            new NodeRow(
+                                key: key,
+                                kind: "MIGRATION",
+                                name: mig.ClassName,
+                                schema: "csharp",
+                                file: mig.FileRelativePath ?? string.Empty,
+                                batch: null,
+                                domain: "code",
+                                bodyPath: null));
 
-                        addedEdges++;
+                        addedMigrations++;
+
+                        // Edges: use UpOperations (schema evolution "forward")
+                        foreach (var op in mig.UpOperations ?? Array.Empty<EfMigrationOperation>())
+                        {
+                            string relation;
+                            switch (op.Kind)
+                            {
+                                case EfMigrationOperationKind.CreateTable:
+                                case EfMigrationOperationKind.DropTable:
+                                case EfMigrationOperationKind.CreateIndex:
+                                case EfMigrationOperationKind.DropIndex:
+                                case EfMigrationOperationKind.TouchTable:
+                                    relation = "SchemaChange";
+                                    break;
+
+                                case EfMigrationOperationKind.RawSql:
+                                case EfMigrationOperationKind.Unknown:
+                                default:
+                                    // Raw SQL is preserved but we do not guess affected tables.
+                                    continue;
+                            }
+
+                            var tableName = op.Table;
+                            if (string.IsNullOrWhiteSpace(tableName))
+                                continue;
+
+                            // For now we default to dbo – SQL side may refine this later.
+                            var toKey = "dbo." + tableName + "|TABLE";
+
+                            edges.Add(new EdgeRow(
+                                from: key,
+                                to: toKey,
+                                relation: relation,
+                                toKind: "TABLE",
+                                file: mig.FileRelativePath ?? string.Empty,
+                                batch: null));
+
+                            addedEdges++;
+                        }
                     }
+                }
+                catch (Exception ex)
+                {
+                    ConsoleLog.Warn("EF-Migrations (v2): failed to analyze root '" + root + "': " + ex.Message);
                 }
             }
 
-            ConsoleLog.Info("EF-Migrations (v2) finished: migrations=" + addedMigrations + ", edges(Up)=" + addedEdges +
-                 ", total nodes=" + nodes.Count + ", total edges=" + edges.Count);
+            // 3) Fallback path: for tiny test scaffolds (like MiniEf) where EfMigrationAnalyzer sees nothing,
+            //    we scan *.cs directly and look for *Migration classes + Schema.Table(...) calls.
+            if (addedMigrations == 0)
+            {
+                int fallbackMigrations = 0;
+                int fallbackEdges = 0;
+
+                foreach (var root in effectiveRoots)
+                {
+                    IEnumerable<string> csFiles;
+                    try
+                    {
+                        csFiles = Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories);
+                    }
+                    catch (Exception ex) when (ex is UnauthorizedAccessException || ex is IOException)
+                    {
+                        ConsoleLog.Warn("EF-Migrations (fallback): cannot enumerate *.cs under " + root + ": " + ex.Message);
+                        continue;
+                    }
+
+                    foreach (var file in csFiles)
+                    {
+                        string code;
+                        try
+                        {
+                            code = File.ReadAllText(file);
+                        }
+                        catch (Exception ex) when (ex is UnauthorizedAccessException || ex is IOException)
+                        {
+                            ConsoleLog.Warn("EF-Migrations (fallback): cannot read " + file + ": " + ex.Message);
+                            continue;
+                        }
+
+                        // Find classes ending with 'Migration'
+                        var classMatches = Regex.Matches(code, @"class\s+(\w*Migration)\b");
+                        if (classMatches.Count == 0)
+                            continue;
+
+                        // Extract table names from Schema.Table(...) calls.
+                        var tableNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                        // Schema.Table(nameof(Customer))
+                        var nameofMatches = Regex.Matches(code, @"Schema\.Table\(\s*nameof\(\s*(\w+)\s*\)\s*\)");
+                        foreach (Match m in nameofMatches)
+                        {
+                            var name = m.Groups[1].Value;
+                            if (!string.IsNullOrWhiteSpace(name))
+                                tableNames.Add(name);
+                        }
+
+                        // Schema.Table("Customer")
+                        var stringMatches = Regex.Matches(code, @"Schema\.Table\(\s*""([^""]+)""\s*\)");
+                        foreach (Match m in stringMatches)
+                        {
+                            var name = m.Groups[1].Value;
+                            if (!string.IsNullOrWhiteSpace(name))
+                                tableNames.Add(name);
+                        }
+
+                        foreach (Match m in classMatches)
+                        {
+                            var className = m.Groups[1].Value;
+                            var migKey = "csharp:" + className + "|MIGRATION";
+
+                            nodes.TryAdd(
+                                migKey,
+                                new NodeRow(
+                                    key: migKey,
+                                    kind: "MIGRATION",
+                                    name: className,
+                                    schema: "csharp",
+                                    file: file,
+                                    batch: null,
+                                    domain: "code",
+                                    bodyPath: null));
+
+                            fallbackMigrations++;
+
+                            foreach (var tableName in tableNames)
+                            {
+                                var tableKey = "dbo." + tableName + "|TABLE";
+
+                                edges.Add(new EdgeRow(
+                                    from: migKey,
+                                    to: tableKey,
+                                    relation: "SchemaChange",
+                                    toKind: "TABLE",
+                                    file: file,
+                                    batch: null));
+
+                                fallbackEdges++;
+                            }
+                        }
+                    }
+                }
+
+                if (fallbackMigrations > 0)
+                {
+                    addedMigrations += fallbackMigrations;
+                    addedEdges += fallbackEdges;
+                    ConsoleLog.Info(
+                        "EF-Migrations (fallback) added: migrations=" + fallbackMigrations +
+                        ", edges=" + fallbackEdges);
+                }
+            }
+
+            ConsoleLog.Info(
+                "EF-Migrations (v2) finished: migrations=" + addedMigrations +
+                ", edges(Up)=" + addedEdges +
+                ", total nodes=" + nodes.Count +
+                ", total edges=" + edges.Count);
         }
+
+
 
         private static Dictionary<string, Tuple<string, string>> ExtractEntityMappings(List<SyntaxTree> trees)
         {
