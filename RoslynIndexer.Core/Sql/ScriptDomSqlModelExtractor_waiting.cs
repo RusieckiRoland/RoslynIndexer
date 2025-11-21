@@ -16,20 +16,36 @@ namespace RoslynIndexer.Core.Sql
     {
         public IEnumerable<SqlArtifact> Extract(RepoPaths paths)
         {
-            if (string.IsNullOrWhiteSpace(paths.SqlPath)) yield break;
-            var root = Path.GetFullPath(paths.SqlPath);
-            if (!Directory.Exists(root)) yield break;
-
-            // Ignore typical junk folders to speed up traversal
-            var ignore = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            { ".git",".vs","bin","obj","Tools","Change Scripts","ChangeScripts","Initial Data","InitialData","Snapshots" };
-
-            foreach (var file in EnumerateSql(root, ignore))
+            // 1) klasyczne pliki .sql z paths.SqlPath
+            if (!string.IsNullOrWhiteSpace(paths.SqlPath))
             {
-                foreach (var art in ExtractFromFile(file))
+                var root = Path.GetFullPath(paths.SqlPath);
+                if (Directory.Exists(root))
+                {
+                    var ignore = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ".git",".vs","bin","obj","Tools",
+                "Change Scripts","ChangeScripts",
+                "Initial Data","InitialData",
+                "Snapshots"
+            };
+
+                    foreach (var file in EnumerateSql(root, ignore))
+                    {
+                        foreach (var art in ExtractFromFile(file))
+                            yield return art;
+                    }
+                }
+            }
+
+            // 2) inline SQL w plikach C# pod paths.InlineSqlPath
+            if (!string.IsNullOrWhiteSpace(paths.InlineSqlPath))
+            {
+                foreach (var art in InlineSqlScanner.ScanInlineSql(paths.InlineSqlPath))
                     yield return art;
             }
         }
+
 
         private static IEnumerable<string> EnumerateSql(string dir, HashSet<string> ignore)
         {

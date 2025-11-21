@@ -366,6 +366,153 @@ namespace RoslynIndexer.Net9.Tests.EndToEnd
             }
         }
 
+        [TestMethod]
+        public void InlineSqlOnly_ProducesGraphNodesAndEdges()
+        {
+            // Root for this test run
+            var testRoot = Path.Combine(
+                Path.GetTempPath(),
+                "RoslynIndexer_E2E_InlineSqlOnly_" + Guid.NewGuid().ToString("N"));
+
+            Directory.CreateDirectory(testRoot);
+
+            try
+            {
+                // 1) Prepare folder structure
+                //    - InlineSqlSolution/InlineSqlProject  → project with inline SQL usage
+                //    - sqlEmpty                            → exists but contains no *.sql files
+                var solutionDir = Path.Combine(testRoot, "InlineSqlSolution");
+                var projectDir = Path.Combine(solutionDir, "InlineSqlProject");
+                var sqlDir = Path.Combine(solutionDir, "sqlEmpty");
+                var tempRoot = Path.Combine(testRoot, "temp");
+                var outDir = Path.Combine(testRoot, "out");
+
+                Directory.CreateDirectory(solutionDir);
+                Directory.CreateDirectory(projectDir);
+                Directory.CreateDirectory(sqlDir);
+                Directory.CreateDirectory(tempRoot);
+                Directory.CreateDirectory(outDir);
+
+                var solutionPath = Path.Combine(solutionDir, "InlineSqlSolution.sln");
+                var projectPath = Path.Combine(projectDir, "InlineSqlProject.csproj");
+                var configPath = Path.Combine(testRoot, "config.json");
+
+                // 2) Minimal solution + project
+                CreateMinimalSln(solutionPath, projectPath);
+                CreateMinimalProjectFile(projectPath);
+
+                // 3) C# file with inline SQL usage.
+                //    We deliberately do NOT create any .sql scripts or migrations.
+                var inlineCode = """
+using System;
+using System.Collections.Generic;
+using System.Data;
+
+namespace InlineSqlSample
+{
+    public sealed class Customer
+    {
+        public int Id { get; set; }
+        public string Name { get; set; } = string.Empty;
+        public bool IsActive { get; set; }
+    }
+
+    public static class RawSql
+    {
+        public static IEnumerable<Customer> LoadCustomers(IDbConnection connection)
+        {
+            const string sql = @"
+SELECT c.Id, c.Name
+FROM dbo.Customer c
+WHERE c.IsActive = 1;
+";
+
+            // In a real application we would execute the SQL.
+            // For the test we only need the raw SQL string to be present in IL.
+            Console.WriteLine(sql);
+
+            return Array.Empty<Customer>();
+        }
+    }
+}
+""";
+
+                var inlineFilePath = Path.Combine(projectDir, "InlineSqlSample.cs");
+                File.WriteAllText(inlineFilePath, inlineCode, Encoding.UTF8);
+
+                // 4) Config: inline-only scenario
+                //    - paths.sql        = sqlDir          (exists, but contains no *.sql files)
+                //    - paths.ef         = ""              (no EF root)
+                //    - paths.migrations = ""              (no migrations)
+                //    - paths.inlineSql  = projectDir      (only source of SQL knowledge)
+                //    - dbGraph.entityBaseTypes = []       (no EF entities)
+                var sb = new StringBuilder();
+
+                sb.AppendLine("{");
+                sb.AppendLine("  \"paths\": {");
+                sb.AppendLine("    \"solution\":   " + JsonString(solutionPath) + ",");
+                sb.AppendLine("    \"tempRoot\":   " + JsonString(tempRoot) + ",");
+                sb.AppendLine("    \"out\":        " + JsonString(outDir) + ",");
+                sb.AppendLine("    \"sql\":        " + JsonString(sqlDir) + ",");
+                sb.AppendLine("    \"ef\":         \"\",");
+                sb.AppendLine("    \"migrations\": \"\",");
+                sb.AppendLine("    \"inlineSql\":  " + JsonString(projectDir));
+                sb.AppendLine("  },");
+                sb.AppendLine("  \"dbGraph\": {");
+                sb.AppendLine("    \"entityBaseTypes\": []");
+                sb.AppendLine("  }");
+                sb.AppendLine("}");
+
+                File.WriteAllText(configPath, sb.ToString(), Encoding.UTF8);
+
+                // 5) Run RoslynIndexer.Net9 with this config
+                RunRoslynIndexerNet9WithConfig(configPath).GetAwaiter().GetResult();
+
+                // 6) After run: Program.Net9 packs tempRoot into ZIP under outDir
+                var zipFiles = Directory.EnumerateFiles(outDir, "*.zip").ToList();
+                Assert.IsTrue(zipFiles.Count >= 1,
+                    "Expected at least one ZIP archive in the 'out' folder for inline-only run.");
+
+                var firstZip = zipFiles[0];
+
+                // 7) Unpack ZIP to inspect sql_code_bundle graph artifacts
+                var unpackRoot = Path.Combine(testRoot, "unzipped");
+                Directory.CreateDirectory(unpackRoot);
+                ZipFile.ExtractToDirectory(firstZip, unpackRoot);
+
+                var sqlBundleRoot = Path.Combine(unpackRoot, "sql_code_bundle");
+                var docsDir = Path.Combine(sqlBundleRoot, "docs");
+                var graphDir = Path.Combine(sqlBundleRoot, "graph");
+
+                var sqlBodiesPath = Path.Combine(docsDir, "sql_bodies.jsonl");
+                var nodesCsvPath = Path.Combine(graphDir, "nodes.csv");
+                var edgesCsvPath = Path.Combine(graphDir, "edges.csv");
+
+                Assert.IsTrue(File.Exists(sqlBodiesPath),
+                    "Expected sql_bodies.jsonl to be produced in inline-only mode (even if minimal).");
+                Assert.IsTrue(File.Exists(nodesCsvPath),
+                    "Expected nodes.csv to be produced in inline-only mode.");
+                Assert.IsTrue(File.Exists(edgesCsvPath),
+                    "Expected edges.csv to be produced in inline-only mode.");
+
+                var nodesLines = File.ReadAllLines(nodesCsvPath);
+                var edgesLines = File.ReadAllLines(edgesCsvPath);
+
+                // We expect inline-SQL stage to actually add something to the graph,
+                // not just headers.
+                Assert.IsTrue(
+                    nodesLines.Length > 1,
+                    "Expected at least one data row in nodes.csv for inline-only run (inline SQL should produce nodes).");
+
+                Assert.IsTrue(
+                    edgesLines.Length > 1,
+                    "Expected at least one data row in edges.csv for inline-only run (inline SQL should produce edges).");
+            }
+            finally
+            {
+                CleanupTestRoot(testRoot);
+            }
+        }
 
 
         [TestMethod]

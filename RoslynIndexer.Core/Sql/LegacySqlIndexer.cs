@@ -31,6 +31,10 @@ namespace RoslynIndexer.Core.Sql
         // When empty, AppendEfMigrationEdgesAndNodes falls back to codeRoots (legacy behaviour).
         public static string[] GlobalEfMigrationRoots { get; set; } = Array.Empty<string>();
 
+        // Global inline-SQL roots (optional) injected from the main config.json (CLI / Program layer).
+        // When empty, inline-SQL stage is skipped.
+        public static string[] GlobalInlineSqlRoots { get; set; } = Array.Empty<string>();
+
         // ====== data rows (classes instead of records) ======
         private sealed class NodeRow
         {
@@ -143,8 +147,11 @@ namespace RoslynIndexer.Core.Sql
             List<string> codeRoots;
             if (!string.IsNullOrWhiteSpace(efRoot))
             {
-                if (File.Exists(efRoot) && Path.GetExtension(efRoot).Equals(".csproj", StringComparison.OrdinalIgnoreCase))
+                if (File.Exists(efRoot) &&
+                    Path.GetExtension(efRoot).Equals(".csproj", StringComparison.OrdinalIgnoreCase))
+                {
                     efRoot = Path.GetDirectoryName(efRoot);
+                }
 
                 var efDir = NormalizeDir(efRoot);
 
@@ -170,14 +177,11 @@ namespace RoslynIndexer.Core.Sql
 
             if (codeRoots.Count > 0)
             {
-                ConsoleLog.Info("Code-roots (" + codeRoots.Count + "):");
+                ConsoleLog.Info("EF code roots:");
                 foreach (var cr in codeRoots)
-                    ConsoleLog.Info("  - " + cr);
+                    ConsoleLog.Info("  " + cr);
 
-                // EF DbContext + raw SQL bridge
-                AppendEfEdgesAndNodes(codeRoots, outputDir, nodes, edges);
-
-                // NEW: EF migrations (FluentMigrator / DataMigration)
+                AppendEfEdgesAndNodes(codeRoots, sqlRoot, nodes, edges);
                 AppendEfMigrationEdgesAndNodes(codeRoots, outputDir, nodes, edges);
             }
             else
@@ -185,15 +189,33 @@ namespace RoslynIndexer.Core.Sql
                 ConsoleLog.Info("No EF code roots detected – EF stage skipped.");
             }
 
-            // 3) Persist CSV/JSON + manifest
-            WriteGraph(outputDir, nodes.Values, edges);
-            WriteManifest(outputDir, sqlRoot, codeRoots, nodes.Count, edges.Count, bodiesJsonlCount);
+            // 3) Inline-SQL (C# methods with raw SQL literals)
+            if (GlobalInlineSqlRoots != null && GlobalInlineSqlRoots.Length > 0)
+            {
+                AppendInlineSqlEdgesAndNodes(
+                    inlineSqlRoots: GlobalInlineSqlRoots,
+                    sqlRoot: sqlRoot,
+                    nodes: nodes,
+                    edges: edges);
+            }
+            else
+            {
+                ConsoleLog.Info("Inline-SQL: no inlineSql roots configured – skipped.");
+            }
 
-            ConsoleLog.Info("SQL/EF graph build completed (nodes=" + nodes.Count
-                 + ", edges=" + edges.Count
-                 + ", bodies=" + bodiesJsonlCount + ").");
+            WriteGraph(outputDir, nodes.Values, edges);
+            WriteManifest(
+                outDir: outputDir,
+                sqlRoot: sqlRoot,
+                codeRoots: codeRoots,
+                nodeCount: nodes.Count,
+                edgeCount: edges.Count,
+                bodiesCount: bodiesJsonlCount);
+
+            ConsoleLog.Info("LegacySqlIndexer finished.");
             return 0;
         }
+
 
         private static bool IsDirectoryEmpty(string path)
         {
@@ -1289,6 +1311,178 @@ namespace RoslynIndexer.Core.Sql
                 ", total edges=" + edges.Count);
         }
 
+        private static void AppendInlineSqlEdgesAndNodes(
+    IEnumerable<string> inlineSqlRoots,
+    string sqlRoot,
+    ConcurrentDictionary<string, NodeRow> nodes,
+    List<EdgeRow> edges)
+        {
+            var roots = inlineSqlRoots?
+                .Where(r => !string.IsNullOrWhiteSpace(r))
+                .Select(NormalizeDir)
+                .Where(Directory.Exists)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray() ?? Array.Empty<string>();
+
+            if (roots.Length == 0)
+            {
+                ConsoleLog.Info("Inline-SQL: no existing roots to scan – skipped.");
+                return;
+            }
+
+            ConsoleLog.Info($"Inline-SQL: scanning {roots.Length} root(s) for raw SQL literals…");
+
+            var csFiles = roots
+                .SelectMany(root =>
+                {
+                    try
+                    {
+                        return Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories);
+                    }
+                    catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is System.Security.SecurityException)
+                    {
+                        ConsoleLog.Warn("Inline-SQL: failed to enumerate '" + root + "': " + ex.Message);
+                        return Array.Empty<string>();
+                    }
+                })
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            if (csFiles.Length == 0)
+            {
+                ConsoleLog.Info("Inline-SQL: no C# files found under inlineSql roots.");
+                return;
+            }
+
+            var parser = new TSql150Parser(initialQuotedIdentifiers: true);
+            int addedMethods = 0;
+            int addedEdges = 0;
+
+            foreach (var file in csFiles)
+            {
+                string text;
+                try
+                {
+                    text = File.ReadAllText(file);
+                }
+                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is System.Security.SecurityException)
+                {
+                    ConsoleLog.Warn("Inline-SQL: failed to read '" + file + "': " + ex.Message);
+                    continue;
+                }
+
+                var tree = CSharpSyntaxTree.ParseText(text, path: file);
+                var root = tree.GetRoot();
+                var fileRel = GetRelativePathSafe(sqlRoot, file);
+
+                foreach (var method in root.DescendantNodes().OfType<MethodDeclarationSyntax>())
+                {
+                    var cls = method.FirstAncestorOrSelf<ClassDeclarationSyntax>();
+                    if (cls == null)
+                        continue;
+
+                    var fullTypeName = FullName(cls);
+                    var methodName = method.Identifier.Text;
+                    var fullMethodName = string.IsNullOrEmpty(fullTypeName)
+                        ? methodName
+                        : fullTypeName + "." + methodName;
+
+                    var methodKey = "csharp:" + fullMethodName + "|METHOD";
+
+                    var sqlLiterals = method
+                        .DescendantNodes()
+                        .OfType<LiteralExpressionSyntax>()
+                        .Where(l => l.IsKind(SyntaxKind.StringLiteralExpression))
+                        .Select(l => l.Token.ValueText)
+                        .Where(LooksLikeSqlLiteral)
+                        .Distinct()
+                        .ToArray();
+
+                    if (sqlLiterals.Length == 0)
+                        continue;
+
+                    // Ensure METHOD node exists
+                    nodes.TryAdd(
+                        methodKey,
+                        new NodeRow(
+                            key: methodKey,
+                            kind: "METHOD",
+                            name: fullMethodName,
+                            schema: "csharp",
+                            file: fileRel,
+                            batch: null,
+                            domain: "code-inline-sql",
+                            bodyPath: null));
+
+                    addedMethods++;
+
+                    foreach (var sql in sqlLiterals)
+                    {
+                        IList<ParseError> errors;
+                        TSqlFragment fragment;
+                        using (var reader = new StringReader(sql))
+                        {
+                            fragment = parser.Parse(reader, out errors);
+                        }
+
+                        if (errors != null && errors.Count > 0)
+                        {
+                            // best-effort only – inline sql z błędami pomijamy
+                            continue;
+                        }
+
+                        var collector = new MiniSqlRefCollector();
+                        fragment.Accept(collector);
+
+                        foreach (var r in collector.Refs)
+                        {
+                            var schema = string.IsNullOrEmpty(r.Item1) ? "dbo" : r.Item1;
+                            var tableName = r.Item2;
+                            var kind = string.IsNullOrEmpty(r.Item3) ? "TABLE" : r.Item3;
+                            var relation = string.IsNullOrEmpty(r.Item4) ? "ReadsFrom" : r.Item4;
+
+                            if (string.IsNullOrEmpty(tableName))
+                                continue;
+
+                            var tableKey = $"{schema}.{tableName}|{kind}";
+
+                            // Nie tworzymy na siłę nowych TABLE – SQL stage zwykle je ma.
+                            // Jeśli nie istnieją, EnrichGraphWithTableNodes / inne narzędzia mogą to później domknąć.
+                            edges.Add(new EdgeRow(
+                                from: methodKey,
+                                to: tableKey,
+                                relation: relation,
+                                toKind: kind,
+                                file: fileRel,
+                                batch: null));
+
+                            addedEdges++;
+                        }
+                    }
+                }
+            }
+
+            ConsoleLog.Info($"Inline-SQL: added {addedMethods} METHOD node(s) and {addedEdges} edge(s) based on raw SQL literals.");
+        }
+
+        private static bool LooksLikeSqlLiteral(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return false;
+
+            var v = value.Trim();
+
+            // Very small, cheap heuristic – enough for our test sample
+            // and safe not to treat normal text as SQL.
+            v = v.ToLowerInvariant();
+            return v.Contains("select ")
+                   || v.Contains("insert ")
+                   || v.Contains("update ")
+                   || v.Contains("delete ")
+                   || v.Contains("merge ")
+                   || v.Contains("from ")
+                   || v.Contains("into ");
+        }
 
 
         private static Dictionary<string, Tuple<string, string>> ExtractEntityMappings(List<SyntaxTree> trees)

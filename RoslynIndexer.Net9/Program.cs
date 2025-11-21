@@ -47,11 +47,12 @@ internal class Program
         var builder = Host.CreateApplicationBuilder(args);
 
         builder.Services
-            .AddSingleton<IWorkspaceLoader, MsBuildWorkspaceLoader>()
-            .AddSingleton<IRepositoryScanner, RepositoryScanner>()
-            .AddSingleton<IFileHasher, FileHasher>()
-            .AddSingleton<ICSharpAnalyzer, CSharpAnalyzer>()
-            .AddSingleton<IndexingPipeline>();
+         .AddSingleton<IWorkspaceLoader, MsBuildWorkspaceLoader>()
+         .AddSingleton<IRepositoryScanner, RepositoryScanner>()
+         .AddSingleton<IFileHasher, FileHasher>()
+         .AddSingleton<ICSharpAnalyzer, CSharpAnalyzer>()       
+         .AddSingleton<ISqlModelExtractor, ScriptDomSqlModelExtractor_waiting>()
+         .AddSingleton<IndexingPipeline>();
 
         var app = builder.Build();
 
@@ -158,6 +159,10 @@ internal class Program
         ? new[] { migrationsPath }
         : Array.Empty<string>();
 
+        LegacySqlIndexer.GlobalInlineSqlRoots = !string.IsNullOrWhiteSpace(inlineSql)
+         ? new[] { inlineSql }
+         : Array.Empty<string>();
+       
         // ===============================
         // 5) Ustaw MSBuild ścieżki (TransformXml itd.)
         // ===============================
@@ -202,6 +207,12 @@ internal class Program
             efPath = migrationsPath;
         }
 
+        // inline-sql fallback: if we still do not have an EF root but inlineSql is configured,
+        // use inlineSql as EF root so LegacySqlIndexer can scan C# for raw SQL usage.
+        if (string.IsNullOrWhiteSpace(efPath) && !string.IsNullOrWhiteSpace(inlineSql))
+        {
+            efPath = inlineSql;
+        }
 
         // ===============================
         // 7) Legacy SQL/EF GRAPH (optional)
@@ -210,6 +221,7 @@ internal class Program
             tempRoot: tempRoot,
             sqlPath: sqlPath ?? string.Empty,
             efPath: efPath ?? string.Empty);
+
 
         // ===============================
         // 8) Git + chunks/deps → artifacts
