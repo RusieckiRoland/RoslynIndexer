@@ -10,6 +10,16 @@
         public string Identifier { get; }    // e.g., proc name / migration id / file+span
         public string? Hash { get; set; }
 
+        /// <summary>
+        /// Optional C# context for inline SQL or other advanced scenarios.
+        /// These fields are null for plain SQL files and migrations.
+        /// </summary>
+        public string? Namespace { get; set; }
+        public string? TypeFullName { get; set; }
+        public string? MethodFullName { get; set; }
+        public int? LineNumber { get; set; }
+        public string? RelativePath { get; set; }
+
         public SqlArtifact(string sourcePath, string artifactKind, string identifier)
         {
             SourcePath = sourcePath;

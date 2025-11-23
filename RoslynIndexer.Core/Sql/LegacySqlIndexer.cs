@@ -15,6 +15,7 @@ using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
+using RoslynIndexer.Core.Models; // SqlArtifact
 
 namespace RoslynIndexer.Core.Sql
 {
@@ -34,6 +35,11 @@ namespace RoslynIndexer.Core.Sql
         // Global inline-SQL roots (optional) injected from the main config.json (CLI / Program layer).
         // When empty, inline-SQL stage is skipped.
         public static string[] GlobalInlineSqlRoots { get; set; } = Array.Empty<string>();
+
+        
+
+
+
 
         // ====== data rows (classes instead of records) ======
         private sealed class NodeRow
@@ -192,7 +198,8 @@ namespace RoslynIndexer.Core.Sql
             // 3) Inline-SQL (C# methods with raw SQL literals)
             if (GlobalInlineSqlRoots != null && GlobalInlineSqlRoots.Length > 0)
             {
-                AppendInlineSqlEdgesAndNodes(
+                // Docelowo zawsze używamy InlineSqlScanner + adaptera.
+                AppendInlineSqlEdgesAndNodes_UsingScanner(
                     inlineSqlRoots: GlobalInlineSqlRoots,
                     sqlRoot: sqlRoot,
                     nodes: nodes,
@@ -202,6 +209,10 @@ namespace RoslynIndexer.Core.Sql
             {
                 ConsoleLog.Info("Inline-SQL: no inlineSql roots configured – skipped.");
             }
+
+
+
+
 
             WriteGraph(outputDir, nodes.Values, edges);
             WriteManifest(
@@ -1311,159 +1322,364 @@ namespace RoslynIndexer.Core.Sql
                 ", total edges=" + edges.Count);
         }
 
-        private static void AppendInlineSqlEdgesAndNodes(
-    IEnumerable<string> inlineSqlRoots,
-    string sqlRoot,
-    ConcurrentDictionary<string, NodeRow> nodes,
-    List<EdgeRow> edges)
+        /// <summary>
+        /// New inline-SQL path: use InlineSqlScanner to produce SqlArtifact
+        /// and then project them onto the legacy graph via
+        /// AppendInlineSqlEdgesAndNodes_FromArtifacts.
+        /// </summary>
+        private static void AppendInlineSqlEdgesAndNodes_UsingScanner(
+            IEnumerable<string> inlineSqlRoots,
+            string sqlRoot,
+            ConcurrentDictionary<string, NodeRow> nodes,
+            List<EdgeRow> edges)
         {
-            var roots = inlineSqlRoots?
+            if (inlineSqlRoots == null)
+            {
+                ConsoleLog.Info("Inline-SQL (scanner): inlineSql roots are null – skipped.");
+                return;
+            }
+
+            // Zbierz tylko niepuste rooty.
+            var rootsList = inlineSqlRoots
                 .Where(r => !string.IsNullOrWhiteSpace(r))
-                .Select(NormalizeDir)
-                .Where(Directory.Exists)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToArray() ?? Array.Empty<string>();
+                .ToList();
 
-            if (roots.Length == 0)
+            if (rootsList.Count == 0)
             {
-                ConsoleLog.Info("Inline-SQL: no existing roots to scan – skipped.");
+                ConsoleLog.Info("Inline-SQL (scanner): no non-empty inlineSql roots – skipped.");
                 return;
             }
 
-            ConsoleLog.Info($"Inline-SQL: scanning {roots.Length} root(s) for raw SQL literals…");
+            // InlineSqlScanner przyjmuje jeden string z separatorami.
+            var rootsCombined = string.Join(";", rootsList);
 
-            var csFiles = roots
-                .SelectMany(root =>
+            ConsoleLog.Info($"Inline-SQL (scanner): scanning roots: {rootsCombined}");
+
+            var artifacts = InlineSqlScanner
+                .ScanInlineSql(rootsCombined)
+                .ToList();
+
+            AppendInlineSqlEdgesAndNodes_FromArtifacts(
+                artifacts: artifacts,
+                sqlRoot: sqlRoot,
+                nodes: nodes,
+                edges: edges);
+        }
+
+
+
+
+
+        /// <summary>
+        /// Adapter that takes InlineSQL SqlArtifact instances (produced by InlineSqlScanner)
+        /// and projects them onto the legacy graph model:
+        ///   - METHOD node: csharp:{MethodFullName}|METHOD
+        ///   - ReadsFrom edge: METHOD -> {schema}.{name}|{kind}
+        ///
+        /// This method is NOT yet wired into RunBuild; it is safe/unused until the switch.
+        /// </summary>
+        private static void AppendInlineSqlEdgesAndNodes_FromArtifacts(
+        IEnumerable<SqlArtifact> artifacts,
+        string sqlRoot,
+        ConcurrentDictionary<string, NodeRow> nodes,
+        List<EdgeRow> edges)
+        {
+            if (artifacts == null)
+            {
+                ConsoleLog.Info("Inline-SQL (scanner): no artifacts provided – skipped.");
+                return;
+            }
+
+            var prepared = new List<SqlArtifact>();
+
+            foreach (var a in artifacts)
+            {
+                if (a == null)
+                    continue;
+
+                if (!string.Equals(a.ArtifactKind, "InlineSQL", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                // Fallback: if scanner did not populate MethodFullName,
+                // try to recover method context from the C# file.
+                if (string.IsNullOrWhiteSpace(a.MethodFullName))
                 {
-                    try
-                    {
-                        return Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories);
-                    }
-                    catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is System.Security.SecurityException)
-                    {
-                        ConsoleLog.Warn("Inline-SQL: failed to enumerate '" + root + "': " + ex.Message);
-                        return Array.Empty<string>();
-                    }
-                })
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToArray();
+                    TryPopulateMethodContextFromFile(a);
+                }
 
-            if (csFiles.Length == 0)
+                if (string.IsNullOrWhiteSpace(a.MethodFullName))
+                    continue;
+
+                prepared.Add(a);
+            }
+
+            if (prepared.Count == 0)
             {
-                ConsoleLog.Info("Inline-SQL: no C# files found under inlineSql roots.");
+                ConsoleLog.Info("Inline-SQL (scanner): no InlineSQL artifacts with method context – skipped.");
                 return;
             }
 
-            var parser = new TSql150Parser(initialQuotedIdentifiers: true);
             int addedMethods = 0;
             int addedEdges = 0;
 
-            foreach (var file in csFiles)
+            // Group by MethodFullName so each C# method becomes a single METHOD node.
+            var groups = prepared.GroupBy(a => a.MethodFullName);
+
+            foreach (var group in groups)
             {
-                string text;
-                try
-                {
-                    text = File.ReadAllText(file);
-                }
-                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is System.Security.SecurityException)
-                {
-                    ConsoleLog.Warn("Inline-SQL: failed to read '" + file + "': " + ex.Message);
+                var methodFullName = group.Key;
+                if (string.IsNullOrWhiteSpace(methodFullName))
                     continue;
-                }
 
-                var tree = CSharpSyntaxTree.ParseText(text, path: file);
-                var root = tree.GetRoot();
-                var fileRel = GetRelativePathSafe(sqlRoot, file);
+                var first = group.First();
 
-                foreach (var method in root.DescendantNodes().OfType<MethodDeclarationSyntax>())
+                // Keep legacy behavior: File column is path relative to sqlRoot.
+                var fileRel = GetRelativePathSafe(sqlRoot, first.SourcePath);
+
+                var methodKey = "csharp:" + methodFullName + "|METHOD";
+
+                // Ensure METHOD node exists (TryAdd is idempotent).
+                nodes.TryAdd(
+                    methodKey,
+                    new NodeRow(
+                        key: methodKey,
+                        kind: "METHOD",
+                        name: methodFullName,
+                        schema: "csharp",
+                        file: fileRel,
+                        batch: null,
+                        domain: "code-inline-sql",
+                        bodyPath: null));
+
+                addedMethods++;
+
+                foreach (var art in group)
                 {
-                    var cls = method.FirstAncestorOrSelf<ClassDeclarationSyntax>();
-                    if (cls == null)
+                    if (!TryParseInlineSqlIdentifier(art.Identifier, out var schema, out var name, out var kind))
                         continue;
 
-                    var fullTypeName = FullName(cls);
-                    var methodName = method.Identifier.Text;
-                    var fullMethodName = string.IsNullOrEmpty(fullTypeName)
-                        ? methodName
-                        : fullTypeName + "." + methodName;
+                    var tableKey = string.Format("{0}.{1}|{2}", schema, name, kind);
 
-                    var methodKey = "csharp:" + fullMethodName + "|METHOD";
+                    // For now, relation is always ReadsFrom – matches the original spec.
+                    edges.Add(new EdgeRow(
+                        from: methodKey,
+                        to: tableKey,
+                        relation: "ReadsFrom",
+                        toKind: kind,
+                        file: fileRel,
+                        batch: null));
 
-                    var sqlLiterals = method
-                        .DescendantNodes()
-                        .OfType<LiteralExpressionSyntax>()
-                        .Where(l => l.IsKind(SyntaxKind.StringLiteralExpression))
-                        .Select(l => l.Token.ValueText)
-                        .Where(LooksLikeSqlLiteral)
-                        .Distinct()
-                        .ToArray();
-
-                    if (sqlLiterals.Length == 0)
-                        continue;
-
-                    // Ensure METHOD node exists
-                    nodes.TryAdd(
-                        methodKey,
-                        new NodeRow(
-                            key: methodKey,
-                            kind: "METHOD",
-                            name: fullMethodName,
-                            schema: "csharp",
-                            file: fileRel,
-                            batch: null,
-                            domain: "code-inline-sql",
-                            bodyPath: null));
-
-                    addedMethods++;
-
-                    foreach (var sql in sqlLiterals)
-                    {
-                        IList<ParseError> errors;
-                        TSqlFragment fragment;
-                        using (var reader = new StringReader(sql))
-                        {
-                            fragment = parser.Parse(reader, out errors);
-                        }
-
-                        if (errors != null && errors.Count > 0)
-                        {
-                            // best-effort only – inline sql z błędami pomijamy
-                            continue;
-                        }
-
-                        var collector = new MiniSqlRefCollector();
-                        fragment.Accept(collector);
-
-                        foreach (var r in collector.Refs)
-                        {
-                            var schema = string.IsNullOrEmpty(r.Item1) ? "dbo" : r.Item1;
-                            var tableName = r.Item2;
-                            var kind = string.IsNullOrEmpty(r.Item3) ? "TABLE" : r.Item3;
-                            var relation = string.IsNullOrEmpty(r.Item4) ? "ReadsFrom" : r.Item4;
-
-                            if (string.IsNullOrEmpty(tableName))
-                                continue;
-
-                            var tableKey = $"{schema}.{tableName}|{kind}";
-
-                            // Nie tworzymy na siłę nowych TABLE – SQL stage zwykle je ma.
-                            // Jeśli nie istnieją, EnrichGraphWithTableNodes / inne narzędzia mogą to później domknąć.
-                            edges.Add(new EdgeRow(
-                                from: methodKey,
-                                to: tableKey,
-                                relation: relation,
-                                toKind: kind,
-                                file: fileRel,
-                                batch: null));
-
-                            addedEdges++;
-                        }
-                    }
+                    addedEdges++;
                 }
             }
 
-            ConsoleLog.Info($"Inline-SQL: added {addedMethods} METHOD node(s) and {addedEdges} edge(s) based on raw SQL literals.");
+            ConsoleLog.Info(
+                $"Inline-SQL (scanner): added {addedMethods} METHOD node(s) and {addedEdges} edge(s) from SqlArtifact stream.");
         }
+
+        /// <summary>
+        /// Best-effort recovery of C# method context for an InlineSQL artifact
+        /// based on SourcePath + LineNumber. Najpierw próbujemy znaleźć metodę,
+        /// która zawiera podaną linię; jeżeli się nie uda, bierzemy metodę,
+        /// której zakres jest "najbliżej" tej linii.
+        /// </summary>
+        private static void TryPopulateMethodContextFromFile(SqlArtifact artifact)
+        {
+            if (artifact == null)
+                return;
+
+            // Jeżeli ktoś już wcześniej wypełnił MethodFullName – nie ruszamy.
+            if (!string.IsNullOrWhiteSpace(artifact.MethodFullName))
+                return;
+
+            if (string.IsNullOrWhiteSpace(artifact.SourcePath) ||
+                !File.Exists(artifact.SourcePath))
+                return;
+
+            try
+            {
+                var text = File.ReadAllText(artifact.SourcePath);
+                var tree = CSharpSyntaxTree.ParseText(text, path: artifact.SourcePath);
+                var root = tree.GetRoot();
+
+                var methods = root
+                    .DescendantNodes()
+                    .OfType<MethodDeclarationSyntax>()
+                    .ToList();
+
+                if (methods.Count == 0)
+                    return;
+
+                MethodDeclarationSyntax? method = null;
+                var line = artifact.LineNumber;
+
+                // 1) Najpierw klasyczne "czy linia wpada w zakres metody".
+                if (line.HasValue && line.Value > 0)
+                {
+                    var target = line.Value;
+
+                    method = methods.FirstOrDefault(m =>
+                    {
+                        var span = m.GetLocation().GetLineSpan();
+                        var start = span.StartLinePosition.Line + 1;
+                        var end = span.EndLinePosition.Line + 1;
+                        return target >= start && target <= end;
+                    });
+
+                    // 2) Jeżeli exact-hit się nie udał (np. lekko przesunięte linie),
+                    // wybieramy metodę, której zakres jest "najbliżej" danej linii.
+                    if (method == null)
+                    {
+                        method = methods
+                            .OrderBy(m =>
+                            {
+                                var span = m.GetLocation().GetLineSpan();
+                                var start = span.StartLinePosition.Line + 1;
+                                var end = span.EndLinePosition.Line + 1;
+
+                                if (target < start) return start - target;
+                                if (target > end) return target - end;
+                                return 0;
+                            })
+                            .FirstOrDefault();
+                    }
+                }
+
+                // 3) Brak linii w artefakcie – bierzemy po prostu pierwszą metodę
+                // z pliku (bez kombinacji). To i tak lepsze niż brak kontekstu.
+                if (method == null)
+                    method = methods.FirstOrDefault();
+
+                if (method == null)
+                    return;
+
+                var ns = GetNamespace(method);
+                var typeName = GetContainingTypeName(method);
+
+                string? typeFullName;
+                if (string.IsNullOrEmpty(typeName))
+                {
+                    typeFullName = string.IsNullOrEmpty(ns) ? null : ns;
+                }
+                else
+                {
+                    typeFullName = string.IsNullOrEmpty(ns)
+                        ? typeName
+                        : ns + "." + typeName;
+                }
+
+                var methodName = method.Identifier.ValueText;
+                string? methodFullName;
+                if (string.IsNullOrEmpty(methodName))
+                {
+                    methodFullName = typeFullName;
+                }
+                else
+                {
+                    methodFullName = string.IsNullOrEmpty(typeFullName)
+                        ? methodName
+                        : typeFullName + "." + methodName;
+                }
+
+                if (!string.IsNullOrEmpty(ns) &&
+                    string.IsNullOrEmpty(artifact.Namespace))
+                {
+                    artifact.Namespace = ns;
+                }
+
+                if (!string.IsNullOrEmpty(typeFullName) &&
+                    string.IsNullOrEmpty(artifact.TypeFullName))
+                {
+                    artifact.TypeFullName = typeFullName;
+                }
+
+                if (!string.IsNullOrEmpty(methodFullName))
+                {
+                    artifact.MethodFullName = methodFullName;
+                }
+            }
+            catch
+            {
+                // Fallback only – nie zabijamy indeksowania, najwyżej artefakt
+                // zostanie bez kontekstu metody.
+            }
+        }
+
+        private static string? GetNamespace(SyntaxNode node)
+        {
+            var current = node.Parent;
+            while (current != null)
+            {
+                if (current is NamespaceDeclarationSyntax ns)
+                    return ns.Name.ToString();
+
+                if (current is FileScopedNamespaceDeclarationSyntax fns)
+                    return fns.Name.ToString();
+
+                current = current.Parent;
+            }
+
+            return null;
+        }
+
+        private static string? GetContainingTypeName(SyntaxNode node)
+        {
+            var current = node.Parent;
+            while (current != null)
+            {
+                if (current is TypeDeclarationSyntax t)
+                    return t.Identifier.ValueText;
+
+                current = current.Parent;
+            }
+
+            return null;
+        }
+
+
+        /// <summary>
+        /// Parses InlineSQL identifier created by InlineSqlScanner.AnalyzeSqlSnippet, e.g.:
+        ///   "dbo.Customer|TABLE_OR_VIEW|inline@Some/File.cs:L42"
+        /// Returns schema, name and kind suitable for graph keys.
+        /// </summary>
+        private static bool TryParseInlineSqlIdentifier(
+            string identifier,
+            out string schema,
+            out string name,
+            out string kind)
+        {
+            schema = "dbo";
+            name = string.Empty;
+            kind = "TABLE_OR_VIEW";
+
+            if (string.IsNullOrWhiteSpace(identifier))
+                return false;
+
+            // Expected format:
+            //   {schema}.{name}|{kind}|inline@{relPath}:L{line}
+            var parts = identifier.Split('|');
+            if (parts.Length < 3)
+                return false;
+
+            var objectId = parts[0];   // e.g. "dbo.Customer"
+            var kindPart = parts[1];   // e.g. "TABLE", "TABLE_OR_VIEW", "PROC"
+
+            if (!string.IsNullOrWhiteSpace(kindPart))
+                kind = kindPart;
+
+            var dotIndex = objectId.IndexOf('.');
+            if (dotIndex <= 0 || dotIndex == objectId.Length - 1)
+                return false;
+
+            schema = objectId.Substring(0, dotIndex);
+            name = objectId.Substring(dotIndex + 1);
+
+            return !string.IsNullOrWhiteSpace(name);
+        }
+
+
+
+
 
         private static bool LooksLikeSqlLiteral(string value)
         {

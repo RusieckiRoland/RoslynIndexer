@@ -47,8 +47,7 @@ namespace InlineSqlSample
 
                 // Act
                 var occurrences = InlineSqlScanner
-                    .ScanInlineSql(root)   // << TU BYŁO ScanDirectory(root)
-                    .Cast<object>()        // we only care that something was detected
+                    .ScanInlineSql(root)
                     .ToList();
 
                 // Assert
@@ -56,6 +55,42 @@ namespace InlineSqlSample
                     occurrences.Any(),
                     "Expected InlineSqlScanner to return at least one occurrence " +
                     "for a simple SELECT literal in LoadCustomers().");
+
+                var first = occurrences.First();
+
+                Assert.AreEqual(
+                    "InlineSQL",
+                    first.ArtifactKind,
+                    "Expected ArtifactKind InlineSQL for inline SQL occurrence.");
+
+                Assert.AreEqual(
+                    "InlineSqlSample.RawSql.LoadCustomers",
+                    first.MethodFullName,
+                    "Expected MethodFullName to reflect the C# method containing the SQL literal.");
+
+                Assert.AreEqual(
+                    "InlineSqlSample.RawSql",
+                    first.TypeFullName,
+                    "Expected TypeFullName to reflect the C# type containing the SQL literal.");
+
+                Assert.AreEqual(
+                    "InlineSqlSample",
+                    first.Namespace,
+                    "Expected Namespace to be InlineSqlSample for the sample code.");
+
+                Assert.IsNotNull(
+                    first.LineNumber,
+                    "Expected LineNumber to be populated for inline SQL artifacts.");
+
+                Assert.AreEqual(
+                    "RawSql.cs",
+                    Path.GetFileName(first.SourcePath),
+                    "Expected SourcePath to point to the RawSql.cs file.");
+
+                Assert.AreEqual(
+                    "RawSql.cs",
+                    Path.GetFileName(first.RelativePath),
+                    "Expected RelativePath to be set and point to RawSql.cs.");
             }
             finally
             {
@@ -91,9 +126,9 @@ namespace InlineSqlSample
 {
     public static class NonSql
     {
-        public static void DoNothing()
+        public static void SayHello()
         {
-            var message = ""hello world"";
+            var text = ""hello world"";
         }
     }
 }
