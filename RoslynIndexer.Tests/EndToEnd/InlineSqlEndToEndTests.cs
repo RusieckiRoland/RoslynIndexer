@@ -278,10 +278,8 @@ CREATE TABLE dbo.Customer
         /// Creates config.json pointing to:
         /// - the generated solution,
         /// - tempRoot, out, sql,
-        /// - and configures paths.inlineSql = inlineSqlDir.
-        ///
-        /// We deliberately keep dbGraph.entityBaseTypes empty here, because this test
-        /// focuses on inline SQL + METHOD nodes, not EF entities.
+        /// - and configures paths.inlineSql / paths.inlineSqlRoot = inlineSqlDir.
+        /// dbGraph.entityBaseTypes is kept empty – this test focuses on inline SQL, not EF.
         /// </summary>
         private static void CreateInlineSqlConfigJson(
             string configPath,
@@ -296,12 +294,16 @@ CREATE TABLE dbo.Customer
             sb.AppendLine("{");
             sb.AppendLine("  \"paths\": {");
             sb.AppendLine("    \"solution\":   " + JsonString(solutionPath) + ",");
+            sb.AppendLine("    \"modelRoot\":      \"\",");
+            // Nowe klucze, których używa Program.Net9
+            sb.AppendLine("    \"sqlRoot\":        " + JsonString(sqlDir) + ",");
+            sb.AppendLine("    \"inlineSqlRoot\":  " + JsonString(inlineSqlDir) + ",");
+            sb.AppendLine("    \"migrationsRoot\": \"\",");
+            sb.AppendLine("    \"outRoot\":        " + JsonString(outDir) + ",");
             sb.AppendLine("    \"tempRoot\":   " + JsonString(tempRoot) + ",");
-            sb.AppendLine("    \"out\":        " + JsonString(outDir) + ",");
-            sb.AppendLine("    \"sql\":        " + JsonString(sqlDir) + ",");
-            sb.AppendLine("    \"ef\":         \"\",");
-            sb.AppendLine("    \"migrations\": \"\",");
-            sb.AppendLine("    \"inlineSql\":  " + JsonString(inlineSqlDir));
+                    
+
+          
             sb.AppendLine("  },");
             sb.AppendLine("  \"dbGraph\": {");
             sb.AppendLine("    \"entityBaseTypes\": []");
@@ -311,6 +313,7 @@ CREATE TABLE dbo.Customer
             var json = sb.ToString();
             File.WriteAllText(configPath, json, Encoding.UTF8);
         }
+
 
         /// <summary>
         /// Runs RoslynIndexer.Net9 in a separate process, as if from CLI:

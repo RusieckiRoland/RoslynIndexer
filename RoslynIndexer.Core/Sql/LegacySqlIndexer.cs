@@ -36,8 +36,17 @@ namespace RoslynIndexer.Core.Sql
         // When empty, inline-SQL stage is skipped.
         public static string[] GlobalInlineSqlRoots { get; set; } = Array.Empty<string>();
 
-        
-
+        /// <summary>
+        /// Optional list of additional "hot" method names used to detect inline SQL
+        /// inside C# invocation expressions (e.g. custom Query/Execute wrappers).
+        /// 
+        /// These values come from config.json (`inlineSql.extraHotMethods`) and are
+        /// merged with the built-in hot methods inside InlineSqlScanner.
+        /// 
+        /// The array is global because the inline-SQL scanner is invoked from the
+        /// SQL/EF graph builder and needs a shared, pre-initialized configuration.
+        /// </summary>
+        public static string[] GlobalInlineSqlHotMethods { get; set; } = Array.Empty<string>();
 
 
 
@@ -202,6 +211,7 @@ namespace RoslynIndexer.Core.Sql
                 AppendInlineSqlEdgesAndNodes_UsingScanner(
                     inlineSqlRoots: GlobalInlineSqlRoots,
                     sqlRoot: sqlRoot,
+                    extraHotMethods: GlobalInlineSqlHotMethods,
                     nodes: nodes,
                     edges: edges);
             }
@@ -302,7 +312,7 @@ namespace RoslynIndexer.Core.Sql
                                         errors.Take(2).Select(e => e.Message + " (L" + e.Line + ",C" + e.Column + ")"));
                                     ConsoleLog.Warn("[" + Path.GetFileName(path) + "] parser errors: " + msg);
                                 }
-                                    
+
                                 var script = fragment as TSqlScript;
                                 if (script == null) return;
                                 var domain = DeriveDomain(sqlRoot, path);
@@ -631,7 +641,7 @@ namespace RoslynIndexer.Core.Sql
         }
 
 
- 
+
 
         private static string NameKey(SchemaObjectName n)
         {
@@ -801,14 +811,12 @@ namespace RoslynIndexer.Core.Sql
             }
         }
 
-       
-
 
         private static void AppendEfEdgesAndNodes(
-            IEnumerable<string> codeRoots,
-            string outDir,
-            ConcurrentDictionary<string, NodeRow> nodes,
-            List<EdgeRow> edges)
+    IEnumerable<string> codeRoots,
+    string outDir,
+    ConcurrentDictionary<string, NodeRow> nodes,
+    List<EdgeRow> edges)
         {
             ConsoleLog.Info("EF stage: scanning C# files (mappings, DbSet, raw SQL, POCO entities).");
 
@@ -840,7 +848,10 @@ namespace RoslynIndexer.Core.Sql
             else
                 ConsoleLog.Info("[dbGraph] entityBaseTypes: <none> (POCO detection off)");
 
-            // 3) Classic DbSet<T> -> TABLE (MapsTo) using entityMap only
+            // 2a) Collect entity names that appear in DbSet<T>/IDbSet<T>.
+            var dbSetEntityNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            // 3) DbSet<T> / IDbSet<T> -> DBSET node + MapsTo TABLE using convention + optional entityMap overrides.
             foreach (var t in trees)
             {
                 var root = t.GetRoot();
@@ -851,14 +862,49 @@ namespace RoslynIndexer.Core.Sql
                         continue;
 
                     var parts = typeText.Split('<', '>');
-                    var typeName = parts.Length > 1 ? parts[1] : typeText;
-                    if (!entityMap.TryGetValue(typeName, out var map))
+                    var typeArg = parts.Length > 1 ? parts[1].Trim() : typeText.Trim();
+                    if (string.IsNullOrWhiteSpace(typeArg))
                         continue;
+
+                    var entityName = typeArg.Split('.').Last();
+                    if (string.IsNullOrWhiteSpace(entityName))
+                        continue;
+
+                    dbSetEntityNames.Add(entityName);
+
+                    // Default EF convention: dbo.EntityName
+                    string schema = "dbo";
+                    string tableName = entityName;
+
+                    // Optional override from entityMap.
+                    if (entityMap.TryGetValue(typeArg, out var map))
+                    {
+                        schema = map.Item1;
+                        tableName = map.Item2;
+                    }
+                    else if (entityMap.TryGetValue(entityName, out map))
+                    {
+                        schema = map.Item1;
+                        tableName = map.Item2;
+                    }
+                    else
+                    {
+                        var foundKey = entityMap.Keys.FirstOrDefault(k =>
+                            string.Equals(k, entityName, StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(k.Split('.').Last(), entityName, StringComparison.OrdinalIgnoreCase));
+
+                        if (foundKey != null)
+                        {
+                            var m = entityMap[foundKey];
+                            schema = m.Item1;
+                            tableName = m.Item2;
+                        }
+                    }
 
                     var clsDecl = prop.FirstAncestorOrSelf<ClassDeclarationSyntax>();
                     var cls = clsDecl != null ? clsDecl.Identifier.Text : "UnknownClass";
                     var from = "csharp:" + cls + "." + prop.Identifier.Text + "|DBSET";
-                    var toKey = map.Item1 + "." + map.Item2 + "|TABLE";
+                    var toKey = schema + "." + tableName + "|TABLE";
 
                     edges.Add(new EdgeRow(
                         from,
@@ -874,52 +920,71 @@ namespace RoslynIndexer.Core.Sql
                 }
             }
 
-            // 4) entityBaseTypes detection -> ENTITY (+ optional MapsTo TABLE)
-            // Encja powstaje ZAWSZE, jeśli dziedziczy po typie z configu.
-            // Mapowanie do TABLE jest "best effort": jeśli znajdziemy tabelę, dokładamy edge.
-            if (dbGraphCfg.HasEntityBaseTypes)
+            // 4) Entity detection from DbSet<T> and/or configured base types.
+            //    - DbSet<T> always marks T as an entity (EF convention).
+            //    - dbGraphCfg.EntityBaseTypes can additionally mark POCOs as entities (even without DbSet).
+            if (dbSetEntityNames.Count > 0 || dbGraphCfg.HasEntityBaseTypes)
             {
+                var hasEntityBaseTypes = dbGraphCfg.HasEntityBaseTypes;
+
                 foreach (var t in trees)
                 {
                     var root = t.GetRoot();
                     foreach (var cls in root.DescendantNodes().OfType<ClassDeclarationSyntax>())
                     {
-                        var baseTypeSyntax = cls.BaseList?.Types.FirstOrDefault();
-                        if (baseTypeSyntax == null)
-                            continue;
+                        var entityName = cls.Identifier.Text;
+                        var isFromDbSet = dbSetEntityNames.Contains(entityName);
+                        bool matchesBase = false;
+                        string? baseTypeText = null;
 
-                        var baseTypeText = baseTypeSyntax.ToString();
-                        if (string.IsNullOrWhiteSpace(baseTypeText))
-                            continue;
-
-                        var baseTypeSimple = baseTypeText.Split('.').Last();
-
-                        Console.WriteLine($"[ENTITY-DEBUG] Class='{cls.Identifier.Text}', BaseSyntax='{baseTypeText}'");
-
-                        bool matchesBase = dbGraphCfg.EntityBaseTypes.Any(cfgType =>
+                        if (hasEntityBaseTypes && cls.BaseList != null && cls.BaseList.Types.Count > 0)
                         {
-                            if (string.IsNullOrWhiteSpace(cfgType))
-                                return false;
+                            var baseTypeSyntax = cls.BaseList.Types.FirstOrDefault();
+                            if (baseTypeSyntax != null)
+                            {
+                                baseTypeText = baseTypeSyntax.ToString();
+                                if (!string.IsNullOrWhiteSpace(baseTypeText))
+                                {
+                                    var baseTypeSimple = baseTypeText.Split('.').Last();
 
-                            var cfgSimple = cfgType.Split('.').Last();
+                                    Console.WriteLine($"[ENTITY-DEBUG] Class='{cls.Identifier.Text}', BaseSyntax='{baseTypeText}'");
 
-                            return string.Equals(baseTypeText, cfgType, StringComparison.Ordinal)
-                                   || string.Equals(baseTypeText, cfgSimple, StringComparison.Ordinal)
-                                   || string.Equals(baseTypeSimple, cfgSimple, StringComparison.Ordinal);
-                        });
+                                    matchesBase = dbGraphCfg.EntityBaseTypes.Any(cfgType =>
+                                    {
+                                        if (string.IsNullOrWhiteSpace(cfgType))
+                                            return false;
 
-                        if (!matchesBase)
-                        {
-                            Console.WriteLine($"[ENTITY-DEBUG]   -> Base DOES NOT match config for '{cls.Identifier.Text}' (base='{baseTypeText}')");
-                            continue;
+                                        var cfgSimple = cfgType.Split('.').Last();
+
+                                        return string.Equals(baseTypeText, cfgType, StringComparison.Ordinal)
+                                               || string.Equals(baseTypeText, cfgSimple, StringComparison.Ordinal)
+                                               || string.Equals(baseTypeSimple, cfgSimple, StringComparison.Ordinal);
+                                    });
+
+                                    if (!matchesBase)
+                                    {
+                                        Console.WriteLine($"[ENTITY-DEBUG]   -> Base DOES NOT match config for '{cls.Identifier.Text}' (base='{baseTypeText}')");
+                                    }
+                                }
+                            }
                         }
 
-                        Console.WriteLine($"[ENTITY-DEBUG]   -> Base MATCHES config for '{cls.Identifier.Text}' (base='{baseTypeText}')");
+                        // If class is neither referenced by DbSet<T> nor matches configured base type, skip it.
+                        if (!isFromDbSet && !matchesBase)
+                            continue;
 
-                        var entityName = cls.Identifier.Text;
+                        if (matchesBase)
+                        {
+                            Console.WriteLine($"[ENTITY-DEBUG]   -> Base MATCHES config for '{cls.Identifier.Text}' (base='{baseTypeText}')");
+                        }
+                        else if (isFromDbSet)
+                        {
+                            Console.WriteLine($"[ENTITY-DEBUG]   -> Marked as ENTITY via DbSet<...> for '{cls.Identifier.Text}'");
+                        }
+
                         var entityKey = $"csharp:{entityName}|ENTITY";
 
-                        // 4a) ZAWSZE dodajemy ENTITY node
+                        // Always add ENTITY node (idempotent when called multiple times).
                         nodes.TryAdd(
                             entityKey,
                             new NodeRow(
@@ -934,7 +999,7 @@ namespace RoslynIndexer.Core.Sql
 
                         Console.WriteLine($"[ENTITY-DEBUG]   -> ENTITY node added for '{entityName}' ({entityKey})");
 
-                        // 4b) Best-effort: spróbuj znaleźć / utworzyć TABLE, żeby dodać MapsTo
+                        // Best-effort: try to find / create TABLE node to attach MapsTo.
                         bool mapFound = false;
                         string schema = "dbo";  // default EF schema
                         string tableName = entityName;
@@ -951,6 +1016,7 @@ namespace RoslynIndexer.Core.Sql
                         {
                             var foundKey = entityMap.Keys.FirstOrDefault(k =>
                                 string.Equals(k, entityName, StringComparison.OrdinalIgnoreCase) ||
+                                string.Equals(k.Split('.').Last(), entityName, StringComparison.OrdinalIgnoreCase) ||
                                 string.Equals(k, entityName + "s", StringComparison.OrdinalIgnoreCase) ||
                                 string.Equals(k + "s", entityName, StringComparison.OrdinalIgnoreCase));
 
@@ -1004,7 +1070,7 @@ namespace RoslynIndexer.Core.Sql
                             }
                         }
 
-                        // 4b.3: fallback – istniejące TABLE z SQL (jeśli są)
+                        // 4b.3: fallback – existing TABLE from SQL stage (if any)
                         if (!mapFound && tableNodes.Count > 0)
                         {
                             var tableNode = tableNodes.FirstOrDefault(n =>
@@ -1021,7 +1087,14 @@ namespace RoslynIndexer.Core.Sql
                             }
                         }
 
-                        // 4c) Jeśli mimo wszystko nie ma TABLE – zostawiamy samą ENTITY
+                        // 4b.4: as a last resort, if class came from DbSet<T>, use convention mapping.
+                        if (!mapFound && isFromDbSet)
+                        {
+                            mapFound = true;
+                            Console.WriteLine($"[ENTITY-DEBUG]   -> Using convention mapping for '{entityName}': {schema}.{tableName} (from DbSet<...>)");
+                        }
+
+                        // 4c) If there is still no TABLE mapping – leave ENTITY alone.
                         if (!mapFound)
                         {
                             Console.WriteLine($"[ENTITY-DEBUG]   -> NO TABLE mapping for '{entityName}' – ENTITY without MapsTo.");
@@ -1030,7 +1103,7 @@ namespace RoslynIndexer.Core.Sql
 
                         var tableKey = $"{schema}.{tableName}|TABLE";
 
-                        // Upewniamy się, że TABLE node istnieje (jeśli już był z SQL – TryAdd pozostawi istniejący).
+                        // Ensure TABLE node exists (existing SQL node is preserved by TryAdd).
                         nodes.TryAdd(
                             tableKey,
                             new NodeRow(
@@ -1056,6 +1129,8 @@ namespace RoslynIndexer.Core.Sql
                 }
             }
         }
+
+
 
         private static void AppendEfMigrationEdgesAndNodes(
          IEnumerable<string> codeRoots,
@@ -1328,10 +1403,11 @@ namespace RoslynIndexer.Core.Sql
         /// AppendInlineSqlEdgesAndNodes_FromArtifacts.
         /// </summary>
         private static void AppendInlineSqlEdgesAndNodes_UsingScanner(
-            IEnumerable<string> inlineSqlRoots,
-            string sqlRoot,
-            ConcurrentDictionary<string, NodeRow> nodes,
-            List<EdgeRow> edges)
+                IEnumerable<string> inlineSqlRoots,
+                string sqlRoot,
+                IEnumerable<string>? extraHotMethods,
+                ConcurrentDictionary<string, NodeRow> nodes,
+                List<EdgeRow> edges)
         {
             if (inlineSqlRoots == null)
             {
@@ -1356,7 +1432,7 @@ namespace RoslynIndexer.Core.Sql
             ConsoleLog.Info($"Inline-SQL (scanner): scanning roots: {rootsCombined}");
 
             var artifacts = InlineSqlScanner
-                .ScanInlineSql(rootsCombined)
+                .ScanInlineSql(rootsCombined, extraHotMethods)
                 .ToList();
 
             AppendInlineSqlEdgesAndNodes_FromArtifacts(

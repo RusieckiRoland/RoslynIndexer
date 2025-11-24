@@ -123,36 +123,36 @@ internal class Program
         // ----- Optional -----
         string? sqlPath = FirstNonEmpty(
             FromCli(cli, "sql"),
-            FromCfg(cfg, "paths.sql", cfgBaseDir, makeAbsolute: true),
-            FromCfg(cfg, "sql", cfgBaseDir, makeAbsolute: true)
+            FromCfg(cfg, "paths.sqlRoot", cfgBaseDir, makeAbsolute: true),
+            FromCfg(cfg, "sqlRoot", cfgBaseDir, makeAbsolute: true)
         );
 
         // Explicit migrations root (can be used even without classic EF DbContext)
         string? migrationsPath = FirstNonEmpty(
             FromCli(cli, "migrations"),
-            FromCfg(cfg, "paths.migrations", cfgBaseDir, makeAbsolute: true),
-            FromCfg(cfg, "migrations", cfgBaseDir, makeAbsolute: true),
+            FromCfg(cfg, "paths.migrationsRoot", cfgBaseDir, makeAbsolute: true),
+            FromCfg(cfg, "migrationsRoot", cfgBaseDir, makeAbsolute: true),
             Environment.GetEnvironmentVariable("MIGRATIONS_PATH")
         );
 
         // EF root used by LegacySqlIndexer (DbContext + migrations or migrations-only)
         string? efPath = FirstNonEmpty(
-            FromCli(cli, "ef"),
-            FromCfg(cfg, "paths.ef", cfgBaseDir, makeAbsolute: true),
-            FromCfg(cfg, "ef", cfgBaseDir, makeAbsolute: true),
+            FromCli(cli, "model"),
+            FromCfg(cfg, "paths.modelRoot", cfgBaseDir, makeAbsolute: true),
+            FromCfg(cfg, "modelRoot", cfgBaseDir, makeAbsolute: true),
             Environment.GetEnvironmentVariable("EF_PATH"),
             migrationsPath        // fallback: treat migrations path as EF root
         );
 
         string? inlineSql = FirstNonEmpty(
             FromCli(cli, "inline-sql"),
-            FromCfg(cfg, "paths.inlineSql", cfgBaseDir, makeAbsolute: true),
+            FromCfg(cfg, "paths.inlineSqlRoot", cfgBaseDir, makeAbsolute: true),
             FromCfg(cfg, "inlineSql", cfgBaseDir, makeAbsolute: true)
         );
 
         string? outDir = FirstNonEmpty(
-            FromCli(cli, "out"),
-            FromCfg(cfg, "paths.out", cfgBaseDir, makeAbsolute: true)
+            FromCli(cli, "outRoot"),
+            FromCfg(cfg, "paths.outRoot", cfgBaseDir, makeAbsolute: true)
         );
 
         LegacySqlIndexer.GlobalEfMigrationRoots =   !string.IsNullOrWhiteSpace(migrationsPath)
@@ -171,11 +171,11 @@ internal class Program
         // Log inputs
         ConsoleLog.Info("[IN] solution   = " + solutionPath);
         ConsoleLog.Info("[IN] temp-root  = " + tempRoot);
-        ConsoleLog.Info("[IN] out        = " + (outDir ?? "(null)"));
-        ConsoleLog.Info("[IN] sql        = " + (sqlPath ?? "(null)"));
-        ConsoleLog.Info("[IN] ef         = " + (efPath ?? "(null)"));
-        ConsoleLog.Info("[IN] migrations = " + (migrationsPath ?? "(null)"));
-        ConsoleLog.Info("[IN] inline-sql = " + (inlineSql ?? "(null)"));
+        ConsoleLog.Info("[IN] out-root        = " + (outDir ?? "(null)"));
+        ConsoleLog.Info("[IN] sql-root        = " + (sqlPath ?? "(null)"));
+        ConsoleLog.Info("[IN] model-root (eg EF POCOs) = " + (efPath ?? "(null)"));
+        ConsoleLog.Info("[IN] migrations-root = " + (migrationsPath ?? "(null)"));
+        ConsoleLog.Info("[IN] inlineSql-root = " + (inlineSql ?? "(null)"));
 
         // Ensure temp dir
         Directory.CreateDirectory(tempRoot);

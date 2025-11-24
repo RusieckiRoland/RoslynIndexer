@@ -479,36 +479,24 @@ namespace RoslynIndexer.Core.Sql
             if (string.IsNullOrWhiteSpace(value))
                 return false;
 
-            var v = value.Trim();
+            // Zamieniamy wszystkie białe znaki na pojedyncze spacje
+            var v = System.Text.RegularExpressions.Regex.Replace(value, @"\s+", " ").ToUpperInvariant();
 
             if (v.Length < 12)
                 return false;
 
-            v = v.ToUpperInvariant();
-
-            bool hasVerb =
-                v.Contains("SELECT ") ||
-                v.Contains("INSERT ") ||
-                v.Contains("UPDATE ") ||
-                v.Contains("DELETE ") ||
-                v.Contains("MERGE ") ||
-                v.Contains("EXEC ") ||
-                v.Contains("EXECUTE ");
+            bool hasVerb = v.Contains("SELECT") || v.Contains("INSERT") ||
+                           v.Contains("UPDATE") || v.Contains("DELETE") ||
+                           v.Contains("MERGE") || v.Contains("EXEC");
 
             if (!hasVerb)
                 return false;
 
-            bool hasStructure =
-                v.Contains(" FROM ") ||
-                v.Contains(" INTO ") ||
-                v.Contains(" WHERE ") ||
-                v.Contains(" JOIN ") ||
-                v.Contains(" TABLE ");
+            bool hasStructure = v.Contains("FROM ") || v.Contains(" INTO ") ||
+                                v.Contains(" WHERE ") || v.Contains(" JOIN ") ||
+                                v.Contains(" TABLE ");
 
-            if (!hasStructure)
-                return false;
-
-            return true;
+            return hasStructure;
         }
 
         private static IEnumerable<SqlArtifact> AnalyzeSqlSnippet(

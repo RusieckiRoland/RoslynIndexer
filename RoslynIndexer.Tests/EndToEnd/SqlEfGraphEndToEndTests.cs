@@ -78,14 +78,15 @@ namespace RoslynIndexer.Net9.Tests.EndToEnd
                 //    dbGraph.entityBaseTypes zostaje takie jak w helperze,
                 //    ale EF stage i tak się nie odpali (brak codeRoots).
                 CreateConfigJson(
-                    configPath,
-                    solutionPath,
-                    tempRoot,
-                    outDir,
-                    sqlDir: sqlDir,
-                    efDir: string.Empty,
-                    migrationsDir: string.Empty);
-
+                  configPath,
+                  solutionPath,
+                  tempRoot,
+                  outDir,
+                  sqlDir: sqlDir,
+                  efDir: string.Empty,
+                  migrationsDir: string.Empty,
+                  includeEntityBaseTypes: false);
+                
                 // 5) Run RoslynIndexer.Net9 with this config
                 RunRoslynIndexerNet9WithConfig(configPath).GetAwaiter().GetResult();
 
@@ -196,7 +197,8 @@ namespace RoslynIndexer.Net9.Tests.EndToEnd
                     outDir,
                     sqlDir: string.Empty,
                     efDir: string.Empty,
-                    migrationsDir: migrationsDir);
+                    migrationsDir: migrationsDir,
+                    includeEntityBaseTypes: false);
 
                 // 5) Run RoslynIndexer.Net9 with this config
                 RunRoslynIndexerNet9WithConfig(configPath).GetAwaiter().GetResult();
@@ -452,11 +454,19 @@ WHERE c.IsActive = 1;
                 sb.AppendLine("  \"paths\": {");
                 sb.AppendLine("    \"solution\":   " + JsonString(solutionPath) + ",");
                 sb.AppendLine("    \"tempRoot\":   " + JsonString(tempRoot) + ",");
-                sb.AppendLine("    \"out\":        " + JsonString(outDir) + ",");
-                sb.AppendLine("    \"sql\":        " + JsonString(sqlDir) + ",");
-                sb.AppendLine("    \"ef\":         \"\",");
-                sb.AppendLine("    \"migrations\": \"\",");
-                sb.AppendLine("    \"inlineSql\":  " + JsonString(projectDir));
+                sb.AppendLine("    \"outRoot\":        " + JsonString(outDir) + ",");
+
+                // New keys used by Program.Net9
+                sb.AppendLine("    \"sqlRoot\":        " + JsonString(sqlDir) + ",");
+                sb.AppendLine("    \"modelRoot\":      \"\",");
+                sb.AppendLine("    \"migrationsRoot\": \"\",");
+                sb.AppendLine("    \"inlineSqlRoot\":  " + JsonString(projectDir) + ",");
+
+                // Legacy aliases (not required, but kept for compatibility)
+               
+            
+           
+                
                 sb.AppendLine("  },");
                 sb.AppendLine("  \"dbGraph\": {");
                 sb.AppendLine("    \"entityBaseTypes\": []");
@@ -464,6 +474,7 @@ WHERE c.IsActive = 1;
                 sb.AppendLine("}");
 
                 File.WriteAllText(configPath, sb.ToString(), Encoding.UTF8);
+
 
                 // 5) Run RoslynIndexer.Net9 with this config
                 RunRoslynIndexerNet9WithConfig(configPath).GetAwaiter().GetResult();
@@ -811,18 +822,11 @@ namespace MiniEf.Migrations
             var filePath = Path.Combine(migrationsDir, "AddCustomerTouchMigration.cs");
             File.WriteAllText(filePath, code, Encoding.UTF8);
         }
-
         /// <summary>
         /// Creates config.json pointing to:
         /// - the generated solution,
         /// - tempRoot, out, sql, ef, migrations,
-        /// and configures dbGraph.entityBaseTypes = ["MiniEf.BaseEntity"].
-        /// </summary>
-        /// <summary>
-        /// Creates config.json pointing to:
-        /// - the generated solution,
-        /// - tempRoot, out, sql, ef, migrations,
-        /// and configures dbGraph.entityBaseTypes = ["MiniEf.BaseEntity"].
+        /// and configures dbGraph.entityBaseTypes (optionally).
         /// </summary>
         private static void CreateConfigJson(
             string configPath,
@@ -831,7 +835,8 @@ namespace MiniEf.Migrations
             string outDir,
             string sqlDir,
             string efDir,
-            string migrationsDir)
+            string migrationsDir,
+            bool includeEntityBaseTypes = true)
         {
             // Build JSON manually to avoid C# raw-string interpolation quirks.
             // JsonString(...) already handles escaping for string values.
@@ -841,22 +846,39 @@ namespace MiniEf.Migrations
             sb.AppendLine("  \"paths\": {");
             sb.AppendLine("    \"solution\":   " + JsonString(solutionPath) + ",");
             sb.AppendLine("    \"tempRoot\":   " + JsonString(tempRoot) + ",");
-            sb.AppendLine("    \"out\":        " + JsonString(outDir) + ",");
+            sb.AppendLine("    \"outRoot\":        " + JsonString(outDir) + ",");
+
+            // New keys used by Program.Net9
+            sb.AppendLine("    \"sqlRoot\":        " + JsonString(sqlDir) + ",");
+            sb.AppendLine("    \"modelRoot\":      " + JsonString(efDir) + ",");
+            sb.AppendLine("    \"migrationsRoot\": " + JsonString(migrationsDir) + ",");
+            sb.AppendLine("    \"inlineSqlRoot\":  \"\",");
+
+            // Legacy aliases (harmless, keep for compatibility)
             sb.AppendLine("    \"sql\":        " + JsonString(sqlDir) + ",");
             sb.AppendLine("    \"ef\":         " + JsonString(efDir) + ",");
             sb.AppendLine("    \"migrations\": " + JsonString(migrationsDir) + ",");
             sb.AppendLine("    \"inlineSql\":  \"\"");
             sb.AppendLine("  },");
+
             sb.AppendLine("  \"dbGraph\": {");
-            sb.AppendLine("    \"entityBaseTypes\": [");
-            sb.AppendLine("      \"MiniEf.BaseEntity\"");
-            sb.AppendLine("    ]");
+            if (includeEntityBaseTypes)
+            {
+                sb.AppendLine("    \"entityBaseTypes\": [");
+                sb.AppendLine("      \"MiniEf.BaseEntity\"");
+                sb.AppendLine("    ]");
+            }
+            else
+            {
+                sb.AppendLine("    \"entityBaseTypes\": []");
+            }
             sb.AppendLine("  }");
             sb.AppendLine("}");
 
             var json = sb.ToString();
             File.WriteAllText(configPath, json, Encoding.UTF8);
         }
+
 
         /// <summary>
         /// Runs RoslynIndexer.Net9 in a separate process, as if from CLI:
