@@ -293,16 +293,21 @@ namespace RoslynIndexer.Core.Sql
                     if (args.Count == 0)
                         continue;
 
-                    // For now we only handle the first argument as a plain string literal
-                    var lit = args[0].Expression as LiteralExpressionSyntax;
-                    if (lit == null || !lit.IsKind(SyntaxKind.StringLiteralExpression))
-                        continue;
+                    var firstArgExpr = args[0].Expression;
 
-                    var sqlText = lit.Token.ValueText;
+                    // Try to resolve SQL text from:
+                    //  - inline string literal,
+                    //  - or simple variable/const initialized with a string literal.
+                    var sqlText = TryGetSqlTextFromArgument(firstArgExpr, rootNode);
                     if (string.IsNullOrWhiteSpace(sqlText))
+                    {
+                        // In the future we could log a warning here that argument is non-literal
+                        // and could not be resolved to a constant string.
                         continue;
+                    }
 
-                    var span = lit.GetLocation().GetLineSpan();
+                    // We use the argument location (not the initializer) as the "inline" location.
+                    var span = firstArgExpr.GetLocation().GetLineSpan();
                     var lineNumber = span.StartLinePosition.Line + 1;
 
                     MethodContext? ctx = null;
@@ -456,6 +461,71 @@ namespace RoslynIndexer.Core.Sql
                 }
             }
         }
+
+        /// <summary>
+        /// Tries to resolve SQL text from an argument expression:
+        ///  - direct string literal,
+        ///  - or simple variable/const initialized with a string literal.
+        /// This is a lightweight heuristic; it does not perform full data-flow analysis.
+        /// </summary>
+        private static string? TryGetSqlTextFromArgument(ExpressionSyntax expr, SyntaxNode rootNode)
+        {
+            // Case 1: direct string literal in the call, e.g. SqlQuery("SELECT ...")
+            if (expr is LiteralExpressionSyntax lit &&
+                lit.IsKind(SyntaxKind.StringLiteralExpression))
+            {
+                return lit.Token.ValueText;
+            }
+
+            // Case 2: identifier referring to a local/const/field initialized with a string literal.
+            // Example:
+            //   const string sql = "SELECT ...";
+            //   FakeDb.SqlQuery(sql);
+            //
+            // or:
+            //   var sql = "SELECT ...";
+            //   FakeDb.SqlQuery(sql);
+            if (expr is IdentifierNameSyntax id)
+            {
+                var name = id.Identifier.ValueText;
+                if (string.IsNullOrEmpty(name))
+                    return null;
+
+                // We restrict the search scope to the containing method if possible,
+                // otherwise we fall back to the whole syntax tree root.
+                SyntaxNode? scope = expr;
+                while (scope != null && scope is not MethodDeclarationSyntax)
+                {
+                    scope = scope.Parent;
+                }
+
+                if (scope == null)
+                {
+                    scope = rootNode;
+                }
+
+                // Look for the first variable declarator with matching name and string literal initializer.
+                var declarator = scope
+                    .DescendantNodes()
+                    .OfType<VariableDeclaratorSyntax>()
+                    .FirstOrDefault(d =>
+                        string.Equals(d.Identifier.ValueText, name, StringComparison.Ordinal) &&
+                        d.Initializer != null &&
+                        d.Initializer.Value is LiteralExpressionSyntax);
+
+                if (declarator?.Initializer?.Value is LiteralExpressionSyntax initLit &&
+                    initLit.IsKind(SyntaxKind.StringLiteralExpression))
+                {
+                    return initLit.Token.ValueText;
+                }
+            }
+
+            // We do not attempt to resolve complex expressions, interpolated strings,
+            // or variables whose value is computed at runtime.
+            return null;
+        }
+
+
 
         private static IEnumerable<string> ExtractStringLiteralsFromLine(string line)
         {

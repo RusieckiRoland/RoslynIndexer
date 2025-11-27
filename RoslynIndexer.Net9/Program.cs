@@ -155,14 +155,38 @@ internal class Program
             FromCfg(cfg, "paths.outRoot", cfgBaseDir, makeAbsolute: true)
         );
 
-        LegacySqlIndexer.GlobalEfMigrationRoots =   !string.IsNullOrWhiteSpace(migrationsPath)
-        ? new[] { migrationsPath }
-        : Array.Empty<string>();
+        LegacySqlIndexer.GlobalEfMigrationRoots = !string.IsNullOrWhiteSpace(migrationsPath)
+    ? new[] { migrationsPath }
+    : Array.Empty<string>();
 
         LegacySqlIndexer.GlobalInlineSqlRoots = !string.IsNullOrWhiteSpace(inlineSql)
-         ? new[] { inlineSql }
-         : Array.Empty<string>();
-       
+            ? new[] { inlineSql }
+            : Array.Empty<string>();
+
+        // Inline-SQL: extra "hot" methods configured via config.inlineSql.extraHotMethods
+        var inlineSqlHotMethods = Array.Empty<string>();
+
+        if (cfg is not null)
+        {
+            var inlineSqlSection = cfg["inlineSql"] as JObject;
+            if (inlineSqlSection is not null)
+            {
+                var extraHot = inlineSqlSection["extraHotMethods"] as JArray;
+                if (extraHot is not null && extraHot.Count > 0)
+                {
+                    inlineSqlHotMethods = extraHot
+                        .OfType<JValue>()
+                        .Select(v => v.Value as string)
+                        .Where(s => !string.IsNullOrWhiteSpace(s))
+                        .Select(s => s!.Trim())
+                        .ToArray();
+                }
+            }
+        }
+
+        LegacySqlIndexer.GlobalInlineSqlHotMethods = inlineSqlHotMethods;
+
+
         // ===============================
         // 5) Ustaw MSBuild ścieżki (TransformXml itd.)
         // ===============================

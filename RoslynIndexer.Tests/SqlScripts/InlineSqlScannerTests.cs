@@ -138,7 +138,7 @@ namespace InlineSqlSample
 
                 // Act
                 var occurrences = InlineSqlScanner
-                    .ScanInlineSql(root)   // << TU BYŁO ScanDirectory(root)
+                    .ScanInlineSql(root)   
                     .Cast<object>()
                     .ToList();
 

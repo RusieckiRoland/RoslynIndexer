@@ -195,7 +195,7 @@ namespace RoslynIndexer.Net9.Adapters
                 if (e.Diagnostic.Kind == WorkspaceDiagnosticKind.Failure)
                 {
                     DotTicker.BreakLine(); // Ensure the error is not appended to the dot line
-                    Console.Error.WriteLine($"[MSBuild-ERR] {e.Diagnostic.Message}");
+                    ConsoleLog.Error($"[MSBuild-ERR] {e.Diagnostic.Message}");
                 }
             };
 
@@ -233,7 +233,7 @@ namespace RoslynIndexer.Net9.Adapters
             catch (Exception ex)
             {
                 DotTicker.BreakLine(); // Also break the dot line before printing exception details
-                Console.Error.WriteLine($"[MSBuild-ERR] {ex.GetType().Name}: {ex.Message}");
+                ConsoleLog.Error($"[MSBuild-ERR] {ex.GetType().Name}: {ex.Message}");
                 throw;
             }
             finally
