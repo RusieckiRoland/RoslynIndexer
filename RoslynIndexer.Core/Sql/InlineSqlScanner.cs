@@ -96,11 +96,21 @@ namespace RoslynIndexer.Core.Sql
 
             var hotMethods = BuildEffectiveHotMethods(extraHotMethods);
 
+            HashSet<string>? extraHotSet = null;
+            if (extraHotMethods != null)
+            {
+                extraHotSet = new HashSet<string>(
+                    extraHotMethods
+                        .Where(m => !string.IsNullOrWhiteSpace(m))
+                        .Select(m => m.Trim()),
+                    StringComparer.Ordinal);
+            }
+
             foreach (var root in SplitRoots(roots))
             {
                 foreach (var file in EnumerateCSharpFiles(root, DefaultIgnoreDirs))
                 {
-                    foreach (var artifact in ExtractFromCSharpFile(root, file, hotMethods))
+                    foreach (var artifact in ExtractFromCSharpFile(root, file, hotMethods, extraHotSet))
                     {
                         yield return artifact;
                     }
@@ -228,9 +238,44 @@ namespace RoslynIndexer.Core.Sql
             return false;
         }
 
-        // RoslynIndexer.Core/Sql/InlineSqlScanner.cs
+        /// <summary>
+        /// Determines whether the invocation text matches any configured hot method
+        /// and returns a stable origin kind:
+        ///  - "ExtraHotMethod" when it comes from config (inlineSql.extraHotMethods),
+        ///  - "HotMethod" for built-in/other effective hot methods,
+        ///  - null when there is no match.
+        /// </summary>
+        private static string? GetHotMethodOrigin(string callText, string[] hotMethods, HashSet<string>? extraHotMethods)
+        {
+            if (string.IsNullOrEmpty(callText))
+                return null;
 
-        private static IEnumerable<SqlArtifact> ExtractFromCSharpFile(string root, string filePath, string[] hotMethods)
+            // ExtraHotMethods have priority: if a call matches both built-in and extra,
+            // we treat it as ExtraHotMethod.
+            if (extraHotMethods != null && extraHotMethods.Count > 0)
+            {
+                foreach (var method in extraHotMethods)
+                {
+                    if (string.IsNullOrEmpty(method))
+                        continue;
+
+                    if (callText.IndexOf(method, StringComparison.Ordinal) >= 0)
+                        return "ExtraHotMethod";
+                }
+            }
+
+            if (ContainsAnyHotMethod(callText, hotMethods))
+                return "HotMethod";
+
+            return null;
+        }
+
+
+        private static IEnumerable<SqlArtifact> ExtractFromCSharpFile(
+    string root,
+    string filePath,
+    string[] hotMethods,
+    HashSet<string>? extraHotMethods)
         {
             string text;
             try
@@ -280,7 +325,9 @@ namespace RoslynIndexer.Core.Sql
                     if (string.IsNullOrEmpty(callText))
                         continue;
 
-                    if (!ContainsAnyHotMethod(callText, hotMethods))
+                    // Determine whether this invocation is HotMethod or ExtraHotMethod.
+                    var originKind = GetHotMethodOrigin(callText, hotMethods, extraHotMethods);
+                    if (originKind == null)
                     {
                         continue;
                     }
@@ -318,11 +365,14 @@ namespace RoslynIndexer.Core.Sql
 
                     bool any = false;
 
-                    // IMPORTANT: for hot methods we do NOT require LooksLikeSql,
-                    // we always try to analyze the snippet.
                     foreach (var art in AnalyzeSqlSnippet(filePath, relPath, lineNumber, sqlText))
                     {
                         any = true;
+
+                        // Attach raw SQL body and origin so later stages can persist it.
+                        art.Body = sqlText;
+                        art.BodyOrigin = originKind;
+
                         EnrichArtifactWithContext(art, relPath, lineNumber, ctx);
                         yield return art;
                     }
@@ -335,7 +385,11 @@ namespace RoslynIndexer.Core.Sql
                         var artifact = new SqlArtifact(
                             sourcePath: filePath,
                             artifactKind: "InlineSQL",
-                            identifier: id);
+                            identifier: id)
+                        {
+                            Body = sqlText,
+                            BodyOrigin = originKind
+                        };
 
                         EnrichArtifactWithContext(artifact, relPath, lineNumber, ctx);
                         yield return artifact;
@@ -350,6 +404,8 @@ namespace RoslynIndexer.Core.Sql
                     .DescendantNodes()
                     .OfType<LiteralExpressionSyntax>()
                     .Where(l => l.IsKind(SyntaxKind.StringLiteralExpression));
+
+                const string heuristicOriginRoslyn = "HeuristicRoslyn";
 
                 foreach (var literalExpr in stringLiterals)
                 {
@@ -378,6 +434,10 @@ namespace RoslynIndexer.Core.Sql
                     foreach (var art in AnalyzeSqlSnippet(filePath, relPath, lineNumber, valueText))
                     {
                         any = true;
+
+                        art.Body = valueText;
+                        art.BodyOrigin = heuristicOriginRoslyn;
+
                         EnrichArtifactWithContext(art, relPath, lineNumber, ctx);
                         yield return art;
                     }
@@ -390,7 +450,11 @@ namespace RoslynIndexer.Core.Sql
                         var artifact = new SqlArtifact(
                             sourcePath: filePath,
                             artifactKind: "InlineSQL",
-                            identifier: id);
+                            identifier: id)
+                        {
+                            Body = valueText,
+                            BodyOrigin = heuristicOriginRoslyn
+                        };
 
                         EnrichArtifactWithContext(artifact, relPath, lineNumber, ctx);
                         yield return artifact;
@@ -415,6 +479,8 @@ namespace RoslynIndexer.Core.Sql
             {
                 yield break;
             }
+
+            const string heuristicOriginFallback = "HeuristicFallback";
 
             for (int i = 0; i < lines.Length; i++)
             {
@@ -442,6 +508,10 @@ namespace RoslynIndexer.Core.Sql
                     foreach (var art in AnalyzeSqlSnippet(filePath, relPath, i + 1, literal))
                     {
                         any = true;
+
+                        art.Body = literal;
+                        art.BodyOrigin = heuristicOriginFallback;
+
                         EnrichArtifactWithContext(art, relPath, i + 1, ctx);
                         yield return art;
                     }
@@ -453,7 +523,11 @@ namespace RoslynIndexer.Core.Sql
                         var artifact = new SqlArtifact(
                             sourcePath: filePath,
                             artifactKind: "InlineSQL",
-                            identifier: id);
+                            identifier: id)
+                        {
+                            Body = literal,
+                            BodyOrigin = heuristicOriginFallback
+                        };
 
                         EnrichArtifactWithContext(artifact, relPath, i + 1, ctx);
                         yield return artifact;
@@ -461,6 +535,7 @@ namespace RoslynIndexer.Core.Sql
                 }
             }
         }
+
 
         /// <summary>
         /// Tries to resolve SQL text from an argument expression:

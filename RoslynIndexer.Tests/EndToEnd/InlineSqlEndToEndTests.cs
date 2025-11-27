@@ -1096,5 +1096,195 @@ namespace InlineSqlExtraHotSample
                 // ignore cleanup errors
             }
         }
+
+        /// <summary>
+        /// End-to-end check for POCO ENTITY bodies:
+        /// - DbSetEntity  => discovered via DbSet<DbSetEntity>
+        /// - IdSetEntity  => discovered via IDbSet<IdSetEntity>
+        /// - BaseTypeEntity => discovered via dbGraph.entityBaseTypes = ["TrackedEntity"]
+        /// - PlainPoco    => must NOT be treated as ENTITY (no DbSet/IDbSet, no base type)
+        ///
+        /// Spec:
+        /// - sql_bodies.jsonl contains entries for:
+        ///       csharp:DbSetEntity|ENTITY
+        ///       csharp:IdSetEntity|ENTITY
+        ///       csharp:BaseTypeEntity|ENTITY
+        /// - sql_bodies.jsonl must NOT contain:
+        ///       csharp:PlainPoco|ENTITY
+        /// </summary>
+        [TestMethod]
+        public void PocoEntities_ProduceBodies_ForDbSet_IdbSet_AndBaseType()
+        {
+            var testRoot = Path.Combine(
+                Path.GetTempPath(),
+                "RoslynIndexer_E2E_PocoBodies_" + Guid.NewGuid().ToString("N"));
+
+            Directory.CreateDirectory(testRoot);
+
+            try
+            {
+                // 1) Prepare folder structure
+                var solutionDir = Path.Combine(testRoot, "PocoSolution");
+                var projectDir = Path.Combine(solutionDir, "PocoProject");
+                var sqlDir = Path.Combine(solutionDir, "sql");
+                var tempRoot = Path.Combine(testRoot, "temp");
+                var outDir = Path.Combine(testRoot, "out");
+
+                Directory.CreateDirectory(solutionDir);
+                Directory.CreateDirectory(projectDir);
+                Directory.CreateDirectory(sqlDir);
+                Directory.CreateDirectory(tempRoot);
+                Directory.CreateDirectory(outDir);
+
+                var solutionPath = Path.Combine(solutionDir, "PocoSolution.sln");
+                var projectPath = Path.Combine(projectDir, "PocoProject.csproj");
+                var configPath = Path.Combine(testRoot, "config_poco.json");
+
+                // 2) Minimal solution + project
+                CreateMinimalSln(solutionPath, projectPath);
+                CreateMinimalProjectFile(projectPath);
+
+                // 3) C# model  POCO + DbSet/IDbSet + base type
+                CreatePocoModelWithDbSetAndBaseType(projectDir);
+
+                // 4) Simple SQL
+                CreateSqlScripts(sqlDir);
+
+                // 5) Config with dbGraph.entityBaseTypes = ["TrackedEntity"]
+                CreatePocoConfigJson(
+                         configPath,
+                         solutionPath,
+                         tempRoot,
+                         outDir,
+                         sqlDir,
+                         modelRoot: projectDir,
+                         entityBaseTypes: new[] { "TrackedEntity" });
+
+                // 6) Run RoslynIndexer.Net9 z tym configiem
+                RunRoslynIndexerNet9WithConfig(configPath).GetAwaiter().GetResult();
+
+                // 7) Simple SQL
+                var bodiesText = ReadSqlBodiesFromFirstZip(outDir);
+
+                // 8) POCO,  (ENTITY):
+                Assert.IsTrue(
+                    bodiesText.Contains("csharp:DbSetEntity|ENTITY", StringComparison.Ordinal),
+                    "Expected POCO ENTITY body for DbSetEntity discovered via DbSet<DbSetEntity>.");
+
+                Assert.IsTrue(
+                    bodiesText.Contains("csharp:IdSetEntity|ENTITY", StringComparison.Ordinal),
+                    "Expected POCO ENTITY body for IdSetEntity discovered via IDbSet<IdSetEntity>.");
+
+                Assert.IsTrue(
+                    bodiesText.Contains("csharp:BaseTypeEntity|ENTITY", StringComparison.Ordinal),
+                    "Expected POCO ENTITY body for BaseTypeEntity discovered via entityBaseTypes config (TrackedEntity).");
+
+                // 9) Class that is not an ENTITY
+                Assert.IsFalse(
+                    bodiesText.Contains("csharp:PlainPoco|ENTITY", StringComparison.Ordinal),
+                    "PlainPoco should not be treated as ENTITY and must not produce a POCO body.");
+            }
+            finally
+            {
+                CleanupTestRoot(testRoot);
+            }
+
+            // ===== Local helpers (scoped to this test) =====
+
+            static void CreatePocoModelWithDbSetAndBaseType(string projectDir)
+            {
+                var code = """
+                        using System;
+                        
+                        namespace PocoSample
+                        {
+                            // Minimal EF-like stubs to avoid real EF dependency.
+                            public class DbSet<T> { }
+                            public interface IDbSet<T> { }
+                        
+                            // Base type used by dbGraph.entityBaseTypes.
+                            public abstract class TrackedEntity
+                            {
+                                public int Id { get; set; }
+                            }
+                        
+                            // ENTITY discovered via DbSet<DbSetEntity>.
+                            public class DbSetEntity
+                            {
+                                public string Name { get; set; }
+                            }
+                        
+                            // ENTITY discovered via IDbSet<IdSetEntity>.
+                            public class IdSetEntity
+                            {
+                                public string Name { get; set; }
+                            }
+                        
+                            // ENTITY discovered purely via base type (TrackedEntity) from config.
+                            public class BaseTypeEntity : TrackedEntity
+                            {
+                                public string Name { get; set; }
+                            }
+                        
+                            // Plain POCO that must *not* be treated as ENTITY.
+                            public class PlainPoco
+                            {
+                                public string ShouldBeIgnored { get; set; }
+                            }
+                        
+                            // Fake DbContext-like class exposing DbSet/IDbSet properties.
+                            public class MyContext
+                            {
+                                public DbSet<DbSetEntity> DbSetEntities { get; set; }
+                                public IDbSet<IdSetEntity> IdSetEntities { get; set; }
+                            }
+                        }
+                        """;
+
+                var filePath = Path.Combine(projectDir, "PocoSample.cs");
+                File.WriteAllText(filePath, code, Encoding.UTF8);
+            }
+
+            static void CreatePocoConfigJson(
+    string configPath,
+    string solutionPath,
+    string tempRoot,
+    string outDir,
+    string sqlDir,
+    string modelRoot,
+    string[] entityBaseTypes)
+            {
+                // We only need SQL + dbGraph.entityBaseTypes + explicit modelRoot for EF/POCO.
+                var sb = new StringBuilder();
+
+                sb.AppendLine("{");
+                sb.AppendLine("  \"paths\": {");
+                sb.AppendLine("    \"solution\":   " + JsonString(solutionPath) + ",");
+                sb.AppendLine("    \"modelRoot\":      " + JsonString(modelRoot) + ",");
+                sb.AppendLine("    \"sqlRoot\":        " + JsonString(sqlDir) + ",");
+                sb.AppendLine("    \"inlineSqlRoot\":  \"\",");
+                sb.AppendLine("    \"migrationsRoot\": \"\",");
+                sb.AppendLine("    \"outRoot\":        " + JsonString(outDir) + ",");
+                sb.AppendLine("    \"tempRoot\":   " + JsonString(tempRoot));
+                sb.AppendLine("  },");
+                sb.AppendLine("  \"dbGraph\": {");
+                sb.AppendLine("    \"entityBaseTypes\": [");
+
+                if (entityBaseTypes != null && entityBaseTypes.Length > 0)
+                {
+                    sb.Append(string.Join(
+                        ", ",
+                        entityBaseTypes.Select(t => JsonString(t))));
+                }
+
+                sb.AppendLine("]");
+                sb.AppendLine("  }");
+                sb.AppendLine("}");
+
+                File.WriteAllText(configPath, sb.ToString(), Encoding.UTF8);
+            }
+
+        }
+
     }
 }

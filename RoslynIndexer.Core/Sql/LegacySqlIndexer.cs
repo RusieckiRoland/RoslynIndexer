@@ -95,6 +95,36 @@ namespace RoslynIndexer.Core.Sql
             }
         }
 
+        private sealed class EntityBodyArtifact
+        {
+            public string EntityKey;
+            public string EntityName;
+            public string? Namespace;
+            public string? TypeFullName;
+            public string SourcePath;
+            public string BodyRelPath;
+            public string Body;
+
+            public EntityBodyArtifact(
+                string entityKey,
+                string entityName,
+                string? @namespace,
+                string? typeFullName,
+                string sourcePath,
+                string bodyRelPath,
+                string body)
+            {
+                EntityKey = entityKey;
+                EntityName = entityName;
+                Namespace = @namespace;
+                TypeFullName = typeFullName;
+                SourcePath = sourcePath;
+                BodyRelPath = bodyRelPath;
+                Body = body;
+            }
+        }
+
+
         /// <summary>
         /// Public entry point — identical signature and behavior as in the legacy tool.
         /// </summary>
@@ -196,7 +226,7 @@ namespace RoslynIndexer.Core.Sql
                 foreach (var cr in codeRoots)
                     ConsoleLog.Info("  " + cr);
 
-                AppendEfEdgesAndNodes(codeRoots, sqlRoot, nodes, edges);
+                AppendEfEdgesAndNodes(codeRoots, outputDir, nodes, edges);
                 AppendEfMigrationEdgesAndNodes(codeRoots, outputDir, nodes, edges);
             }
             else
@@ -814,12 +844,22 @@ namespace RoslynIndexer.Core.Sql
 
 
         private static void AppendEfEdgesAndNodes(
-    IEnumerable<string> codeRoots,
-    string outDir,
-    ConcurrentDictionary<string, NodeRow> nodes,
-    List<EdgeRow> edges)
+          IEnumerable<string> codeRoots,
+          string outDir,
+          ConcurrentDictionary<string, NodeRow> nodes,
+          List<EdgeRow> edges)
         {
             ConsoleLog.Info("EF stage: scanning C# files (mappings, DbSet, raw SQL, POCO entities).");
+
+            // Ensure docs/bodies directory exists – POCO bodies will be written here.
+            var docsDir = Path.Combine(outDir, "docs");
+            var bodiesDir = Path.Combine(docsDir, "bodies");
+            Directory.CreateDirectory(docsDir);
+            Directory.CreateDirectory(bodiesDir);
+
+            // We keep a per-run registry of ENTITY bodies so that each entityKey
+            // gets at most one body file and one JSONL entry.
+            var pocoBodies = new Dictionary<string, EntityBodyArtifact>(StringComparer.OrdinalIgnoreCase);
 
             var csFiles = codeRoots
                 .SelectMany(r => Directory.EnumerateFiles(r, "*.cs", SearchOption.AllDirectories))
@@ -964,7 +1004,8 @@ namespace RoslynIndexer.Core.Sql
 
                                     if (!matchesBase)
                                     {
-                                        Console.WriteLine($"[ENTITY-DEBUG]   -> Base DOES NOT match config for '{cls.Identifier.Text}' (base='{baseTypeText}')");
+                                        Console.WriteLine(
+                                            $"[ENTITY-DEBUG]   -> Base DOES NOT match config for '{cls.Identifier.Text}' (base='{baseTypeText}')");
                                     }
                                 }
                             }
@@ -976,27 +1017,77 @@ namespace RoslynIndexer.Core.Sql
 
                         if (matchesBase)
                         {
-                            Console.WriteLine($"[ENTITY-DEBUG]   -> Base MATCHES config for '{cls.Identifier.Text}' (base='{baseTypeText}')");
+                            Console.WriteLine(
+                                $"[ENTITY-DEBUG]   -> Base MATCHES config for '{cls.Identifier.Text}' (base='{baseTypeText}')");
                         }
                         else if (isFromDbSet)
                         {
-                            Console.WriteLine($"[ENTITY-DEBUG]   -> Marked as ENTITY via DbSet<...> for '{cls.Identifier.Text}'");
+                            Console.WriteLine(
+                                $"[ENTITY-DEBUG]   -> Marked as ENTITY via DbSet<...> for '{cls.Identifier.Text}'");
                         }
 
                         var entityKey = $"csharp:{entityName}|ENTITY";
 
-                        // Always add ENTITY node (idempotent when called multiple times).
-                        nodes.TryAdd(
-                            entityKey,
-                            new NodeRow(
+                        // 4a) Create POCO body file once per ENTITY and remember it for sql_bodies.jsonl.
+                        if (!pocoBodies.ContainsKey(entityKey))
+                        {
+                            var ns = GetNamespace(cls);
+                            var typeFullName = FullName(cls);
+                            var typeNameForFile = string.IsNullOrEmpty(typeFullName) ? entityName : typeFullName;
+
+                            var safeTypeName = new string(
+                                typeNameForFile
+                                    .Select(ch => char.IsLetterOrDigit(ch) || ch == '.' || ch == '_' ? ch : '_')
+                                    .ToArray());
+
+                            var bodyFileName = $"Poco.{safeTypeName}.ENTITY.cs";
+                            var bodyAbsPath = Path.Combine(bodiesDir, bodyFileName);
+                            var bodyRelPath = "docs/bodies/" + bodyFileName;
+
+                            // Extract class text from the syntax tree – we keep exactly the C# class body.
+                            var text = t.GetText();
+                            var bodyText = text.ToString(cls.Span);
+
+                            File.WriteAllText(bodyAbsPath, bodyText, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+
+                            var artifact = new EntityBodyArtifact(
+                                entityKey: entityKey,
+                                entityName: entityName,
+                                @namespace: ns,
+                                typeFullName: typeFullName,
+                                sourcePath: t.FilePath,
+                                bodyRelPath: bodyRelPath,
+                                body: bodyText);
+
+                            pocoBodies[entityKey] = artifact;
+
+                            nodes.TryAdd(
                                 entityKey,
-                                "ENTITY",
-                                entityName,
-                                "csharp",
-                                t.FilePath,
-                                null,
-                                "code",
-                                null));
+                                new NodeRow(
+                                    entityKey,
+                                    "ENTITY",
+                                    entityName,
+                                    "csharp",
+                                    t.FilePath,
+                                    null,
+                                    "code",
+                                    bodyRelPath));
+                        }
+                        else
+                        {
+                            // ENTITY node without overwriting an existing bodyPath (if any).
+                            nodes.TryAdd(
+                                entityKey,
+                                new NodeRow(
+                                    entityKey,
+                                    "ENTITY",
+                                    entityName,
+                                    "csharp",
+                                    t.FilePath,
+                                    null,
+                                    "code",
+                                    pocoBodies[entityKey].BodyRelPath));
+                        }
 
                         Console.WriteLine($"[ENTITY-DEBUG]   -> ENTITY node added for '{entityName}' ({entityKey})");
 
@@ -1006,12 +1097,13 @@ namespace RoslynIndexer.Core.Sql
                         string tableName = entityName;
 
                         // 4b.1: entityMap (Fluent / EF mappings)
-                        if (entityMap.TryGetValue(entityName, out var map))
+                        if (entityMap.TryGetValue(entityName, out var map2))
                         {
-                            schema = map.Item1;
-                            tableName = map.Item2;
+                            schema = map2.Item1;
+                            tableName = map2.Item2;
                             mapFound = true;
-                            Console.WriteLine($"[ENTITY-DEBUG]   -> Using entityMap direct for '{entityName}': {schema}.{tableName}");
+                            Console.WriteLine(
+                                $"[ENTITY-DEBUG]   -> Using entityMap direct for '{entityName}': {schema}.{tableName}");
                         }
                         else
                         {
@@ -1027,7 +1119,8 @@ namespace RoslynIndexer.Core.Sql
                                 schema = m.Item1;
                                 tableName = m.Item2;
                                 mapFound = true;
-                                Console.WriteLine($"[ENTITY-DEBUG]   -> Using entityMap heuristic for '{entityName}': key='{foundKey}', table={schema}.{tableName}");
+                                Console.WriteLine(
+                                    $"[ENTITY-DEBUG]   -> Using entityMap heuristic for '{entityName}': key='{foundKey}', table={schema}.{tableName}");
                             }
                         }
 
@@ -1067,7 +1160,8 @@ namespace RoslynIndexer.Core.Sql
                                 }
 
                                 mapFound = true;
-                                Console.WriteLine($"[ENTITY-DEBUG]   -> Using [Table] attribute for '{entityName}': {schema}.{tableName}");
+                                Console.WriteLine(
+                                    $"[ENTITY-DEBUG]   -> Using [Table] attribute for '{entityName}': {schema}.{tableName}");
                             }
                         }
 
@@ -1084,7 +1178,8 @@ namespace RoslynIndexer.Core.Sql
                                 schema = string.IsNullOrEmpty(tableNode.Schema) ? "dbo" : tableNode.Schema;
                                 tableName = tableNode.Name;
                                 mapFound = true;
-                                Console.WriteLine($"[ENTITY-DEBUG]   -> Using TABLE node fallback for '{entityName}': {schema}.{tableName}");
+                                Console.WriteLine(
+                                    $"[ENTITY-DEBUG]   -> Using TABLE node fallback for '{entityName}': {schema}.{tableName}");
                             }
                         }
 
@@ -1092,13 +1187,15 @@ namespace RoslynIndexer.Core.Sql
                         if (!mapFound && isFromDbSet)
                         {
                             mapFound = true;
-                            Console.WriteLine($"[ENTITY-DEBUG]   -> Using convention mapping for '{entityName}': {schema}.{tableName} (from DbSet<...>)");
+                            Console.WriteLine(
+                                $"[ENTITY-DEBUG]   -> Using convention mapping for '{entityName}': {schema}.{tableName} (from DbSet<...>)");
                         }
 
                         // 4c) If there is still no TABLE mapping – leave ENTITY alone.
                         if (!mapFound)
                         {
-                            Console.WriteLine($"[ENTITY-DEBUG]   -> NO TABLE mapping for '{entityName}' – ENTITY without MapsTo.");
+                            Console.WriteLine(
+                                $"[ENTITY-DEBUG]   -> NO TABLE mapping for '{entityName}' – ENTITY without MapsTo.");
                             continue;
                         }
 
@@ -1125,12 +1222,69 @@ namespace RoslynIndexer.Core.Sql
                             t.FilePath,
                             null));
 
-                        Console.WriteLine($"[ENTITY-DEBUG]   -> ENTITY + MapsTo added for '{entityName}' => {tableKey}");
+                        Console.WriteLine(
+                            $"[ENTITY-DEBUG]   -> ENTITY + MapsTo added for '{entityName}' => {tableKey}");
                     }
                 }
+
+                // After all entities are processed, append POCO bodies to sql_bodies.jsonl.
+                AppendEntityBodiesToJsonl(outDir, pocoBodies.Values.ToList());
             }
         }
 
+        /// <summary>
+        /// Appends POCO ENTITY bodies to sql_bodies.jsonl.
+        /// Each artifact represents a single C# entity class that was treated as ENTITY
+        /// (either via DbSet&lt;T&gt; or configured EntityBaseTypes).
+        /// </summary>
+        private static void AppendEntityBodiesToJsonl(
+            string outputDir,
+            IReadOnlyList<EntityBodyArtifact> entityBodies)
+        {
+            if (string.IsNullOrWhiteSpace(outputDir))
+                return;
+
+            if (entityBodies == null || entityBodies.Count == 0)
+                return;
+
+            var docsDir = Path.Combine(outputDir, "docs");
+            Directory.CreateDirectory(docsDir);
+
+            // Same file as SQL and inline SQL bodies; POCO ENTITY entries are just another kind.
+            var bodiesPath = Path.Combine(docsDir, "sql_bodies.jsonl");
+
+            try
+            {
+                using (var stream = new FileStream(bodiesPath, FileMode.Append, FileAccess.Write, FileShare.Read))
+                using (var writer = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)))
+                {
+                    foreach (var e in entityBodies)
+                    {
+                        if (e == null)
+                            continue;
+
+                        var jsonObject = new
+                        {
+                            key = e.EntityKey,          // e.g. "csharp:Product|ENTITY"
+                            kind = "ENTITY",
+                            name = e.EntityName,
+                            @namespace = e.Namespace,
+                            typeFullName = e.TypeFullName,
+                            file = e.SourcePath,        // full C# path
+                            bodyPath = e.BodyRelPath,   // docs/bodies/Poco....
+                            body = e.Body               // raw C# class text
+                        };
+
+                        writer.WriteLine(JsonConvert.SerializeObject(jsonObject));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // Do not fail the entire indexer – POCO bodies are helpful but not critical.
+                ConsoleLog.Warn("ENTITY bodies (POCO): failed to append POCO bodies to sql_bodies.jsonl: " + ex.Message);
+            }
+        }
 
 
         private static void AppendEfMigrationEdgesAndNodes(
@@ -1446,10 +1600,10 @@ namespace RoslynIndexer.Core.Sql
             AppendInlineSqlBodiesToJsonl(outputDir, artifacts);
         }
 
-        // Appends inline-SQL entries to sql_bodies.jsonl,
-        // so that MethodFullName is included in the file.
-        // Tests only verify that methodFullName appears anywhere in the JSONL,
-        // so the line can be minimal.
+        // Appends inline-SQL entries to sql_bodies.jsonl and creates .sql body files
+        // in docs/bodies for InlineSQL artifacts originating from C# code.
+        // Tests only require that methodFullName appears in the JSONL; additional fields
+        // (origin, body, bodyPath, C# context) are safe to add.
         private static void AppendInlineSqlBodiesToJsonl(
             string outputDir,
             IReadOnlyList<SqlArtifact> artifacts)
@@ -1460,18 +1614,19 @@ namespace RoslynIndexer.Core.Sql
             if (artifacts == null || artifacts.Count == 0)
                 return;
 
+            var docsDir = Path.Combine(outputDir, "docs");
+            var bodiesDir = Path.Combine(docsDir, "bodies");
+
+            // Ensure both docs and bodies directories exist.
+            Directory.CreateDirectory(docsDir);
+            Directory.CreateDirectory(bodiesDir);
+
             // Path consistent with BuildSqlKnowledge output:
-            //   <outputDir>\docs\bodies\sql_bodies.jsonl
-            var bodiesPath = Path.Combine(outputDir, "docs", "sql_bodies.jsonl");
+            //   <outputDir>\docs\sql_bodies.jsonl
+            var bodiesPath = Path.Combine(docsDir, "sql_bodies.jsonl");
 
             try
             {
-                var bodiesDir = Path.GetDirectoryName(bodiesPath);
-                if (!string.IsNullOrEmpty(bodiesDir))
-                {
-                    Directory.CreateDirectory(bodiesDir);
-                }
-
                 // Append mode — do not overwrite content already written by the SQL parser (.sql files).
                 using (var stream = new FileStream(bodiesPath, FileMode.Append, FileAccess.Write, FileShare.Read))
                 using (var writer = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)))
@@ -1487,12 +1642,46 @@ namespace RoslynIndexer.Core.Sql
                         if (string.IsNullOrWhiteSpace(a.MethodFullName))
                             continue;
 
-                        // Minimal JSONL entry — only methodFullName is required by tests.
-                        // We do not inject SQL body here because SqlArtifact does not contain it.
-                        var jsonLine =
-                            $"{{\"key\":\"{a.MethodFullName}\",\"kind\":\"InlineSQL\",\"methodFullName\":\"{a.MethodFullName}\"}}";
+                        var sqlText = a.Body ?? string.Empty;
+                        string? bodyRelPath = null;
 
-                        writer.WriteLine(jsonLine);
+                        if (!string.IsNullOrEmpty(sqlText))
+                        {
+                            // Build a stable file name that can be traced back to the method and line.
+                            var safeMethodName = new string(
+                                a.MethodFullName
+                                    .Select(ch => char.IsLetterOrDigit(ch) || ch == '.' || ch == '_' ? ch : '_')
+                                    .ToArray());
+
+                            var linePart = a.LineNumber.HasValue
+                                ? "L" + a.LineNumber.Value.ToString()
+                                : "L0";
+
+                            var fileName = $"InlineSql.{safeMethodName}.{linePart}.sql";
+                            var bodyAbsPath = Path.Combine(bodiesDir, fileName);
+
+                            // Overwrite is fine — for a given method+line the SQL body is deterministic.
+                            File.WriteAllText(bodyAbsPath, sqlText, new UTF8Encoding(false));
+                            bodyRelPath = "docs/bodies/" + fileName;
+                        }
+
+                        // Rich JSONL entry for InlineSQL, keeping methodFullName for tests.
+                        var jsonObject = new
+                        {
+                            key = a.MethodFullName,
+                            kind = "InlineSQL",
+                            methodFullName = a.MethodFullName,
+                            bodyOrigin = a.BodyOrigin,          // "HotMethod" / "ExtraHotMethod" / "HeuristicRoslyn" / "HeuristicFallback"
+                            @namespace = a.Namespace,
+                            typeFullName = a.TypeFullName,
+                            relativePath = a.RelativePath,      // C# file relative to inlineSql root
+                            file = a.SourcePath,                // full C# path as seen by scanner
+                            lineNumber = a.LineNumber,
+                            bodyPath = bodyRelPath,             // docs/bodies/InlineSql....sql (or null if body is empty)
+                            body = sqlText                      // raw inline SQL text
+                        };
+
+                        writer.WriteLine(JsonConvert.SerializeObject(jsonObject));
                     }
                 }
             }
@@ -1502,7 +1691,6 @@ namespace RoslynIndexer.Core.Sql
                 ConsoleLog.Warn("Inline-SQL (scanner): failed to append inline SQL bodies to sql_bodies.jsonl: " + ex.Message);
             }
         }
-
 
 
 

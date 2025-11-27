@@ -20,6 +20,18 @@
         public int? LineNumber { get; set; }
         public string? RelativePath { get; set; }
 
+        /// <summary>
+        /// Optional raw SQL body and origin for InlineSQL artifacts.
+        /// For legacy TSQL / EF-Migration artifacts these remain null.
+        /// </summary>
+        public string? Body { get; set; }
+
+        /// <summary>
+        /// Describes where the inline SQL body came from:
+        /// "HotMethod", "ExtraHotMethod", "HeuristicRoslyn", "HeuristicFallback".
+        /// </summary>
+        public string? BodyOrigin { get; set; }
+
         public SqlArtifact(string sourcePath, string artifactKind, string identifier)
         {
             SourcePath = sourcePath;
