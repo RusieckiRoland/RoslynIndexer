@@ -235,9 +235,9 @@ namespace RoslynIndexer.Net9.Tests.EndToEnd
                 var edgesLines = File.ReadAllLines(edgesCsvPath);
 
                 // 8) MIGRATION node must exist
-                Assert.IsTrue(
-                    nodesLines.Any(l => l.Contains("csharp:AddCustomerTouchMigration|MIGRATION")),
-                    "Expected MIGRATION node for AddCustomerTouchMigration in migrations-only graph.");
+                 Assert.IsTrue(
+                 nodesLines.Any(l => l.Contains("csharp:MiniEf.Migrations.AddCustomerTouchMigration|MIGRATION")),
+                 "Expected MIGRATION node for AddCustomerTouchMigration in migrations-only graph.");
 
                 // 9) TABLE node for dbo.Customer must be created even without SQL,
                 //    dzięki EnrichGraphWithTableNodes (patrzy na edges.csv).
@@ -246,12 +246,12 @@ namespace RoslynIndexer.Net9.Tests.EndToEnd
                     "Expected TABLE node for dbo.Customer (dbo.Customer|TABLE) in migrations-only graph.");
 
                 // 10) MIGRATION --> TABLE (SchemaChange) edge
-                Assert.IsTrue(
-                    edgesLines.Any(l =>
-                        l.Contains("csharp:AddCustomerTouchMigration|MIGRATION") &&
-                        l.Contains("dbo.Customer|TABLE") &&
-                        l.Contains("SchemaChange")),
-                    "Expected SchemaChange edge: MIGRATION -> dbo.Customer|TABLE in migrations-only graph.");
+                            Assert.IsTrue(
+                 edgesLines.Any(l =>
+                     l.Contains("csharp:MiniEf.Migrations.AddCustomerTouchMigration|MIGRATION") &&
+                     l.Contains("dbo.Customer|TABLE") &&
+                     l.Contains("SchemaChange")),
+                 "Expected SchemaChange edge: MIGRATION -> dbo.Customer|TABLE in migrations-only graph.");
 
                 // I na koniec sanity check: w tym teście w ogóle nie oczekujemy ENTITY.
                 Assert.IsFalse(
@@ -621,8 +621,8 @@ WHERE c.IsActive = 1;
 
                 // MIGRATION node
                 Assert.IsTrue(
-                    nodesLines.Any(l => l.Contains("csharp:AddCustomerTouchMigration|MIGRATION")),
-                    "Expected MIGRATION node for AddCustomerTouchMigration.");
+               nodesLines.Any(l => l.Contains("csharp:MiniEf.Migrations.AddCustomerTouchMigration|MIGRATION")),
+               "Expected MIGRATION node for AddCustomerTouchMigration.");
 
                 // ENTITY --> TABLE (MapsTo)
                 Assert.IsTrue(
@@ -634,11 +634,12 @@ WHERE c.IsActive = 1;
 
                 // MIGRATION --> TABLE (SchemaChange)
                 Assert.IsTrue(
-                    edgesLines.Any(l =>
-                        l.Contains("csharp:AddCustomerTouchMigration|MIGRATION") &&
-                        l.Contains("dbo.Customer|TABLE") &&
-                        l.Contains("SchemaChange")),
-                    "Expected SchemaChange edge: MIGRATION -> dbo.Customer|TABLE.");
+                 edgesLines.Any(l =>
+                     l.Contains("csharp:MiniEf.Migrations.AddCustomerTouchMigration|MIGRATION") &&
+                     l.Contains("dbo.Customer|TABLE") &&
+                     l.Contains("SchemaChange")),
+                 "Expected SchemaChange edge: MIGRATION -> dbo.Customer|TABLE.");
+
             }
             finally
             {

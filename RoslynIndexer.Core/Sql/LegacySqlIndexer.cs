@@ -25,6 +25,12 @@ namespace RoslynIndexer.Core.Sql
     /// </summary>
     public static class LegacySqlIndexer
     {
+        // ========================================================
+        //  SQL indexing (legacy)
+        // ========================================================
+        private static readonly SqlScriptGenerator SqlGen =
+            new Sql150ScriptGenerator(new SqlScriptGeneratorOptions { IncludeSemicolons = true });
+
         // Global dbGraph settings injected once from the main config.json (CLI layer).
         public static DbGraphConfig GlobalDbGraphConfig { get; set; } = DbGraphConfig.Empty;
 
@@ -32,99 +38,21 @@ namespace RoslynIndexer.Core.Sql
         // When empty, AppendEfMigrationEdgesAndNodes falls back to codeRoots (legacy behaviour).
         public static string[] GlobalEfMigrationRoots { get; set; } = Array.Empty<string>();
 
-        // Global inline-SQL roots (optional) injected from the main config.json (CLI / Program layer).
-        // When empty, inline-SQL stage is skipped.
-        public static string[] GlobalInlineSqlRoots { get; set; } = Array.Empty<string>();
-
         /// <summary>
         /// Optional list of additional "hot" method names used to detect inline SQL
         /// inside C# invocation expressions (e.g. custom Query/Execute wrappers).
-        /// 
+        ///
         /// These values come from config.json (`inlineSql.extraHotMethods`) and are
         /// merged with the built-in hot methods inside InlineSqlScanner.
-        /// 
+        ///
         /// The array is global because the inline-SQL scanner is invoked from the
         /// SQL/EF graph builder and needs a shared, pre-initialized configuration.
         /// </summary>
         public static string[] GlobalInlineSqlHotMethods { get; set; } = Array.Empty<string>();
 
-
-
-        // ====== data rows (classes instead of records) ======
-        private sealed class NodeRow
-        {
-            public string Key;
-            public string Kind;
-            public string Name;
-            public string Schema;
-            public string File;
-            public int? Batch;
-            public string Domain;
-            public string BodyPath;
-
-            public NodeRow(string key, string kind, string name, string schema, string file, int? batch, string domain, string bodyPath)
-            {
-                Key = key;
-                Kind = kind;
-                Name = name;
-                Schema = schema;
-                File = file;
-                Batch = batch;
-                Domain = domain;
-                BodyPath = bodyPath;
-            }
-        }
-
-        private sealed class EdgeRow
-        {
-            public string From;
-            public string To;
-            public string Relation;
-            public string ToKind;
-            public string File;
-            public int? Batch;
-
-            public EdgeRow(string from, string to, string relation, string toKind, string file, int? batch)
-            {
-                From = from;
-                To = to;
-                Relation = relation;
-                ToKind = toKind;
-                File = file;
-                Batch = batch;
-            }
-        }
-
-        private sealed class EntityBodyArtifact
-        {
-            public string EntityKey;
-            public string EntityName;
-            public string? Namespace;
-            public string? TypeFullName;
-            public string SourcePath;
-            public string BodyRelPath;
-            public string Body;
-
-            public EntityBodyArtifact(
-                string entityKey,
-                string entityName,
-                string? @namespace,
-                string? typeFullName,
-                string sourcePath,
-                string bodyRelPath,
-                string body)
-            {
-                EntityKey = entityKey;
-                EntityName = entityName;
-                Namespace = @namespace;
-                TypeFullName = typeFullName;
-                SourcePath = sourcePath;
-                BodyRelPath = bodyRelPath;
-                Body = body;
-            }
-        }
-
-
+        // Global inline-SQL roots (optional) injected from the main config.json (CLI / Program layer).
+        // When empty, inline-SQL stage is skipped.
+        public static string[] GlobalInlineSqlRoots { get; set; } = Array.Empty<string>();
         /// <summary>
         /// Public entry point — identical signature and behavior as in the legacy tool.
         /// </summary>
@@ -165,689 +93,18 @@ namespace RoslynIndexer.Core.Sql
             }
         }
 
-
-        // ====== Build orchestration (legacy parity) ======
-        private static int RunBuild(string outputDir, string sqlProjectRoot, string efRoot = "")
+        private static string AppendDirSep(string dir)
         {
-            var outGraph = Path.Combine(outputDir, "graph");
-            var outDocs = Path.Combine(outputDir, "docs");
-            Directory.CreateDirectory(outGraph);
-            Directory.CreateDirectory(outDocs);
-            Directory.CreateDirectory(Path.Combine(outDocs, "bodies"));
-
-            var sqlRoot = NormalizeDir(sqlProjectRoot);
-            if (!Directory.Exists(sqlRoot))
-            {
-                ConsoleLog.Error("Provided sqlProjectRoot does not exist: " + sqlRoot);
-                return 1;
-            }
-
-            ConsoleLog.Info("SQL root: " + sqlRoot);
-            ConsoleLog.Info("Out dir : " + outputDir);
-
-            // 1) SQL indexing
-            var (nodes, edges, bodiesJsonlCount) = BuildSqlKnowledge(sqlRoot, outputDir);
-
-            // 2) EF autodiscovery / explicit root
-            List<string> codeRoots;
-            if (!string.IsNullOrWhiteSpace(efRoot))
-            {
-                if (File.Exists(efRoot) &&
-                    Path.GetExtension(efRoot).Equals(".csproj", StringComparison.OrdinalIgnoreCase))
-                {
-                    efRoot = Path.GetDirectoryName(efRoot);
-                }
-
-                var efDir = NormalizeDir(efRoot);
-
-                if (!Directory.Exists(efDir))
-                {
-                    ConsoleLog.Warn("Provided efRoot does not exist: " + efDir + " — falling back to autodiscovery.");
-                    codeRoots = AutoDiscoverCodeRoots(sqlRoot);
-                }
-                else if (IsDirectoryEmpty(efDir))
-                {
-                    ConsoleLog.Warn("Provided efRoot directory is empty: " + efDir + " — falling back to autodiscovery.");
-                    codeRoots = AutoDiscoverCodeRoots(sqlRoot);
-                }
-                else
-                {
-                    codeRoots = new List<string> { efDir };
-                }
-            }
-            else
-            {
-                codeRoots = AutoDiscoverCodeRoots(sqlRoot);
-            }
-
-            if (codeRoots.Count > 0)
-            {
-                ConsoleLog.Info("EF code roots:");
-                foreach (var cr in codeRoots)
-                    ConsoleLog.Info("  " + cr);
-
-                AppendEfEdgesAndNodes(codeRoots, outputDir, nodes, edges);
-                AppendEfMigrationEdgesAndNodes(codeRoots, outputDir, nodes, edges);
-            }
-            else
-            {
-                ConsoleLog.Info("No EF code roots detected – EF stage skipped.");
-            }
-
-            // 3) Inline-SQL (C# methods with raw SQL literals)
-            if (GlobalInlineSqlRoots != null && GlobalInlineSqlRoots.Length > 0)
-            {
-                // Docelowo zawsze używamy InlineSqlScanner + adaptera.
-                AppendInlineSqlEdgesAndNodes_UsingScanner(
-                 inlineSqlRoots: GlobalInlineSqlRoots,
-                 sqlRoot: sqlRoot,
-                 extraHotMethods: GlobalInlineSqlHotMethods,
-                 outputDir: outputDir,
-                 nodes: nodes,
-                 edges: edges);
-            }
-            else
-            {
-                ConsoleLog.Info("Inline-SQL: no inlineSql roots configured – skipped.");
-            }
-
-
-
-
-
-            WriteGraph(outputDir, nodes.Values, edges);
-            WriteManifest(
-                outDir: outputDir,
-                sqlRoot: sqlRoot,
-                codeRoots: codeRoots,
-                nodeCount: nodes.Count,
-                edgeCount: edges.Count,
-                bodiesCount: bodiesJsonlCount);
-
-            ConsoleLog.Info("LegacySqlIndexer finished.");
-            return 0;
+            if (string.IsNullOrEmpty(dir)) return dir;
+            if (dir.EndsWith(Path.DirectorySeparatorChar.ToString())) return dir;
+            return dir + Path.DirectorySeparatorChar;
         }
-
-
-        private static bool IsDirectoryEmpty(string path)
-        {
-            try { return !Directory.EnumerateFileSystemEntries(path).Any(); }
-            catch { return true; }
-        }
-
-        private static string NormalizeDir(string p)
-        {
-            var full = Path.GetFullPath(p);
-            return full.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        }
-
-        // ========================================================
-        //  SQL indexing (legacy)
-        // ========================================================
-        private static readonly SqlScriptGenerator SqlGen =
-            new Sql150ScriptGenerator(new SqlScriptGeneratorOptions { IncludeSemicolons = true });
-
-        private static (ConcurrentDictionary<string, NodeRow>, List<EdgeRow>, int) BuildSqlKnowledge(string sqlRoot, string outDir)
-        {
-            ConsoleLog.Info("SQL stage: scanning .sql files…");
-            var ignore = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            {
-                "Change Scripts","ChangeScripts","Initial Data","InitialData",
-                "Snapshots","Tools",".git",".vs","bin","obj"
-            };
-
-            IEnumerable<string> EnumerateSql(string dir)
-            {
-                foreach (var d in Directory.EnumerateDirectories(dir))
-                {
-                    var name = Path.GetFileName(d);
-                    if (ignore.Contains(name)) continue;
-                    foreach (var p in EnumerateSql(d))
-                        yield return p;
-                }
-
-                foreach (var f in Directory.EnumerateFiles(dir, "*.sql"))
-                    yield return f;
-            }
-
-            var files = EnumerateSql(sqlRoot).ToArray();
-            ConsoleLog.Info("Found SQL files: " + files.Length);
-
-            var nodes = new ConcurrentDictionary<string, NodeRow>(StringComparer.OrdinalIgnoreCase);
-            var edges = new ConcurrentBag<EdgeRow>();
-            var definedKinds = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-            var parser = new TSql150Parser(true);
-            var bodiesDir = Path.Combine(outDir, "docs", "bodies");
-            var bodiesJsonl = Path.Combine(outDir, "docs", "sql_bodies.jsonl");
-            Directory.CreateDirectory(bodiesDir);
-            int bodiesCount = 0;
-
-            using (var bodiesWriter = new StreamWriter(bodiesJsonl, false, new UTF8Encoding(false)))
-            {
-                files
-                    .AsParallel()
-                    .WithDegreeOfParallelism(Environment.ProcessorCount)
-                    .ForAll(path =>
-                    {
-                        try
-                        {
-                            var sql = ReadAndPreprocess(path);
-                            IList<ParseError> errors;
-                            using (var sr = new StringReader(sql))
-                            {
-                                var fragment = parser.Parse(sr, out errors);
-                                if (errors != null && errors.Count > 0)
-                                {
-                                    var msg = string.Join("; ",
-                                        errors.Take(2).Select(e => e.Message + " (L" + e.Line + ",C" + e.Column + ")"));
-                                    ConsoleLog.Warn("[" + Path.GetFileName(path) + "] parser errors: " + msg);
-                                }
-
-                                var script = fragment as TSqlScript;
-                                if (script == null) return;
-                                var domain = DeriveDomain(sqlRoot, path);
-                                var isPrePost = IsPreOrPostDeployment(path);
-
-                                for (int bi = 0; bi < script.Batches.Count; bi++)
-                                {
-                                    var batch = script.Batches[bi];
-                                    var collector = new RefCollector();
-                                    batch.Accept(collector);
-
-                                    List<Tuple<SchemaObjectName, string, TSqlFragment>> defines;
-                                    if (collector.Defines.Count > 0)
-                                    {
-                                        defines = collector.Defines;
-                                    }
-                                    else
-                                    {
-                                        var pseudo = MakePseudoDefine(path, bi, isPrePost ? "DEPLOY" : "BATCH");
-                                        defines = new List<Tuple<SchemaObjectName, string, TSqlFragment>> { pseudo };
-                                    }
-
-                                    foreach (var def in defines)
-                                    {
-                                        var key = Key(def.Item1, def.Item2);
-                                        var schema = def.Item1.SchemaIdentifier != null
-                                            ? def.Item1.SchemaIdentifier.Value
-                                            : "dbo";
-                                        var name = def.Item1.BaseIdentifier != null
-                                            ? def.Item1.BaseIdentifier.Value
-                                            : "(anon)";
-
-                                        string bodyRelPath = null;
-                                        if (IsBodyKind(def.Item2))
-                                        {
-                                            var fileName = schema + "." + name + "." + def.Item2 + ".sql";
-                                            var bodyAbs = Path.Combine(bodiesDir, fileName);
-                                            string scripted;
-                                            lock (SqlGen)
-                                            {
-                                                SqlGen.GenerateScript(def.Item3, out scripted);
-                                                File.WriteAllText(bodyAbs, scripted, new UTF8Encoding(false));
-                                            }
-
-                                            bodyRelPath = "docs/bodies/" + fileName;
-
-                                            lock (bodiesWriter)
-                                            {
-                                                var obj = new
-                                                {
-                                                    key,
-                                                    kind = def.Item2,
-                                                    schema,
-                                                    name,
-                                                    domain,
-                                                    file = path,
-                                                    body = File.ReadAllText(bodyAbs, Encoding.UTF8)
-                                                };
-                                                bodiesWriter.WriteLine(JsonConvert.SerializeObject(obj));
-                                                bodiesCount++;
-                                            }
-                                        }
-
-                                        var node = new NodeRow(key, def.Item2, name, schema, path, bi, domain, bodyRelPath);
-                                        nodes.TryAdd(key, node);
-                                        definedKinds.TryAdd(NameKey(def.Item1), def.Item2);
-
-                                        foreach (var r in collector.References)
-                                        {
-                                            var toKeyBase = NameKey(r.Item1);
-                                            var toKind = r.Item2 ?? "UNKNOWN";
-                                            edges.Add(new EdgeRow(
-                                                from: key,
-                                                to: toKeyBase + "|" + toKind,
-                                                relation: r.Item3 ?? "Uses",
-                                                toKind: toKind,
-                                                file: path,
-                                                batch: bi
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            ConsoleLog.Error("[SQL:" + Path.GetFileName(path) + "] " + ex.Message);
-                        }
-                    });
-            }
-
-            // resolve kinds on edges + dedupe
-            var fixedEdges = new List<EdgeRow>(edges.Count);
-            foreach (var e in edges)
-            {
-                var split = SplitToNameAndKind(e.To);
-                var baseName = split.Item1;
-                var _kind = split.Item2;
-
-                if (definedKinds.TryGetValue(baseName, out var realKind))
-                {
-                    fixedEdges.Add(new EdgeRow(
-                        e.From,
-                        baseName + "|" + realKind,
-                        e.Relation,
-                        realKind,
-                        e.File,
-                        e.Batch));
-                }
-                else
-                {
-                    fixedEdges.Add(e);
-                }
-            }
-
-            fixedEdges = fixedEdges
-                .GroupBy(x => x.From + "|" + x.To + "|" + x.Relation)
-                .Select(g => g.First())
-                .ToList();
-
-            // ensure missing target nodes exist
-            foreach (var e in fixedEdges)
-            {
-                if (!nodes.ContainsKey(e.To))
-                {
-                    var pair = SplitToNameAndKind(e.To);
-                    var baseName = pair.Item1;
-                    var kind = pair.Item2;
-                    var sn = SplitSchemaAndName(baseName);
-                    var schema = sn.Item1;
-                    var name = sn.Item2;
-
-                    nodes.TryAdd(
-                        e.To,
-                        new NodeRow(e.To, kind, name, schema, null, null, "(external)", null));
-                }
-            }
-
-            ConsoleLog.Info("SQL stage finished: nodes=" + nodes.Count + ", edges=" + fixedEdges.Count + ", bodies=" + bodiesCount);
-            return (nodes, fixedEdges, bodiesCount);
-        }
-
-        private static bool IsBodyKind(string kind)
-            => kind == "PROC" || kind == "FUNC" || kind == "VIEW" ||
-               kind == "TRIGGER" || kind == "TABLE" || kind == "SEQUENCE" || kind == "TYPE";
-
-        private static string ReadAndPreprocess(string path)
-        {
-            var text = File.ReadAllText(path);
-            var sb = new StringBuilder();
-
-            foreach (var raw in text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
-            {
-                if (Regex.IsMatch(raw, @"^\s*:(r|setvar|connect|on\s+error\s+exit)\b",
-                        RegexOptions.IgnoreCase))
-                    continue;
-
-                sb.AppendLine(raw);
-            }
-
-            var cleaned = sb.ToString();
-            cleaned = Regex.Replace(cleaned, @"\$\([^)]+\)", "0");
-            return cleaned;
-        }
-
-        private static string DeriveDomain(string root, string file)
-        {
-            var rel = GetRelativePathSafe(root, file);
-            var parts = rel.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
-                StringSplitOptions.RemoveEmptyEntries);
-            return parts.Length > 1 ? parts[0] : string.Empty;
-        }
-
-        private static bool IsPreOrPostDeployment(string p)
-        {
-            var name = Path.GetFileName(p);
-            return name.Equals("PreDeployment.sql", StringComparison.OrdinalIgnoreCase)
-                   || name.Equals("PostDeployment.sql", StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static Tuple<string, string> SplitToNameAndKind(string key)
-        {
-            var i = key.LastIndexOf('|');
-            if (i >= 0)
-                return Tuple.Create(key.Substring(0, i), key.Substring(i + 1));
-
-            return Tuple.Create(key, "UNKNOWN");
-        }
-
-        private static Tuple<string, string> SplitSchemaAndName(string baseName)
-        {
-            var parts = baseName.Split('.');
-            if (parts.Length == 3) return Tuple.Create(parts[1], parts[2]);
-            if (parts.Length == 2) return Tuple.Create(parts[0], parts[1]);
-            return Tuple.Create("dbo", parts[parts.Length - 1]);
-        }
-
-        private static List<string> AutoDiscoverCodeRoots(string sqlRoot)
-        {
-            var results = new List<string>();
-
-            DirectoryInfo parent;
-            try
-            {
-                parent = Directory.GetParent(sqlRoot);
-            }
-            catch (Exception ex) when (ex is ArgumentException || ex is PathTooLongException)
-            {
-                ConsoleLog.Warn("AutoDiscoverCodeRoots: invalid sqlRoot '" + sqlRoot + "': " + ex.Message);
-                return results;
-            }
-
-            if (parent == null)
-                return results;
-
-            var p2 = parent.Parent ?? parent;
-            var p3 = p2.Parent ?? p2;
-            var src = p3.FullName;
-
-            var preferred = Path.Combine(src, "Server", "DataAccess");
-            var bases = Directory.Exists(preferred)
-                ? new[] { preferred }
-                : new[] { src };
-
-            string[] excludes = { "test", "tests", "example", "examples", "sample", "samples", "dev", "client", "tools" };
-
-            bool IsExcluded(string path) =>
-                path.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
-                        StringSplitOptions.RemoveEmptyEntries)
-                    .Any(seg => excludes.Any(x =>
-                        string.Equals(seg, x, StringComparison.OrdinalIgnoreCase)));
-
-            string[] csproj;
-            try
-            {
-                csproj = bases
-                    .Where(Directory.Exists)
-                    .SelectMany(b => Directory.EnumerateFiles(b, "*.csproj", SearchOption.AllDirectories))
-                    .Where(p => p.IndexOf("\\bin\\", StringComparison.OrdinalIgnoreCase) < 0 &&
-                                p.IndexOf("/bin/", StringComparison.OrdinalIgnoreCase) < 0 &&
-                                p.IndexOf("\\obj\\", StringComparison.OrdinalIgnoreCase) < 0 &&
-                                p.IndexOf("/obj/", StringComparison.OrdinalIgnoreCase) < 0)
-                    .Where(p => !IsExcluded(p))
-                    .ToArray();
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                ConsoleLog.Warn("AutoDiscoverCodeRoots: unauthorized while enumerating *.csproj under "
-                    + string.Join(";", bases) + ": " + ex.Message);
-                csproj = Array.Empty<string>();
-            }
-            catch (IOException ex)
-            {
-                ConsoleLog.Warn("AutoDiscoverCodeRoots: IO error while enumerating *.csproj under "
-                    + string.Join(";", bases) + ": " + ex.Message);
-                csproj = Array.Empty<string>();
-            }
-
-            bool LooksLikeEfDir(string dir)
-            {
-                string[] files;
-                try
-                {
-                    files = Directory
-                        .EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories)
-                        .Take(300)
-                        .ToArray();
-                }
-                catch (UnauthorizedAccessException ex)
-                {
-                    ConsoleLog.Warn("AutoDiscoverCodeRoots: unauthorized while enumerating *.cs under " + dir + ": " + ex.Message);
-                    return false;
-                }
-                catch (IOException ex)
-                {
-                    ConsoleLog.Warn("AutoDiscoverCodeRoots: IO error while enumerating *.cs under " + dir + ": " + ex.Message);
-                    return false;
-                }
-
-                foreach (var f in files)
-                {
-                    string txt;
-                    try
-                    {
-                        txt = File.ReadAllText(f);
-                    }
-                    catch (UnauthorizedAccessException ex)
-                    {
-                        ConsoleLog.Warn("AutoDiscoverCodeRoots: unauthorized while reading " + f + ": " + ex.Message);
-                        continue;
-                    }
-                    catch (IOException ex)
-                    {
-                        ConsoleLog.Warn("AutoDiscoverCodeRoots: IO error while reading " + f + ": " + ex.Message);
-                        continue;
-                    }
-
-                    if (Regex.IsMatch(txt, @"class\s+\w+\s*:\s*(\w+\.)*(Identity)?DbContext\b"))
-                        return true;
-
-                    if (txt.Contains(" DbSet<") || txt.Contains("\tDbSet<"))
-                        return true;
-                }
-
-                return false;
-            }
-
-            foreach (var proj in csproj)
-            {
-                var dir = Path.GetDirectoryName(proj);
-                if (string.IsNullOrEmpty(dir))
-                    continue;
-
-                try
-                {
-                    if (LooksLikeEfDir(dir))
-                        results.Add(dir);
-                }
-                catch (Exception ex) when (ex is UnauthorizedAccessException || ex is IOException)
-                {
-                    ConsoleLog.Warn("AutoDiscoverCodeRoots: error while scanning directory " + dir + ": " + ex.Message);
-                }
-            }
-
-            return results;
-        }
-
-
-
-
-        private static string NameKey(SchemaObjectName n)
-        {
-            var db = n.DatabaseIdentifier != null ? n.DatabaseIdentifier.Value : null;
-            var schema = n.SchemaIdentifier != null ? n.SchemaIdentifier.Value : "dbo";
-            var name = n.BaseIdentifier != null ? n.BaseIdentifier.Value : "(anon)";
-            return (db != null ? db + "." : "") + schema + "." + name;
-        }
-
-        private static string Key(SchemaObjectName n, string kind) => NameKey(n) + "|" + kind;
-
-        private static Tuple<SchemaObjectName, string, TSqlFragment> MakePseudoDefine(string file, int bi, string kind)
-        {
-            var n = new SchemaObjectName();
-            n.Identifiers.Add(new Identifier { Value = "dbo" });
-            n.Identifiers.Add(new Identifier
-            {
-                Value = "__" + kind.ToLowerInvariant() + "__:" + Path.GetFileName(file) + ":" + bi
-            });
-            return Tuple.Create(n, kind, (TSqlFragment)new TSqlScript());
-        }
-
-        // ====== Visitor (legacy) ======
-        private sealed class RefCollector : TSqlFragmentVisitor
-        {
-            public readonly List<Tuple<SchemaObjectName, string, string>> References =
-                new List<Tuple<SchemaObjectName, string, string>>();
-
-            public readonly List<Tuple<SchemaObjectName, string, TSqlFragment>> Defines =
-                new List<Tuple<SchemaObjectName, string, TSqlFragment>>();
-
-            private bool IsTempOrVar(SchemaObjectName n)
-            {
-                var bi = n.BaseIdentifier != null ? n.BaseIdentifier.Value : null;
-                if (bi == null) return false;
-                return bi.StartsWith("#") || bi.StartsWith("@");
-            }
-
-            private void AddDefine(SchemaObjectName name, string kind, TSqlFragment frag)
-            {
-                if (name == null || name.BaseIdentifier == null) return;
-                Defines.Add(Tuple.Create(name, kind, frag));
-            }
-
-            private void AddRef(SchemaObjectName name, string kindHint, string relation)
-            {
-                if (name == null || name.BaseIdentifier == null) return;
-                if (IsTempOrVar(name)) return;
-                References.Add(Tuple.Create(name, kindHint, relation));
-            }
-
-            // Definitions
-            public override void Visit(CreateTableStatement node) =>
-                AddDefine(node.SchemaObjectName, "TABLE", node);
-
-            public override void Visit(CreateViewStatement node) =>
-                AddDefine(node.SchemaObjectName, "VIEW", node);
-
-            public override void Visit(CreateProcedureStatement node)
-            {
-                if (node.ProcedureReference != null)
-                    AddDefine(node.ProcedureReference.Name, "PROC", node);
-            }
-
-            public override void Visit(CreateFunctionStatement node) =>
-                AddDefine(node.Name, "FUNC", node);
-
-            public override void Visit(CreateTypeTableStatement node) =>
-                AddDefine(node.Name, "TYPE", node);
-
-            public override void Visit(CreateTypeUddtStatement node) =>
-                AddDefine(node.Name, "TYPE", node);
-
-            public override void Visit(CreateSequenceStatement node) =>
-                AddDefine(node.Name, "SEQUENCE", node);
-
-            public override void ExplicitVisit(CreateSynonymStatement node)
-            {
-                AddDefine(node.Name, "SYNONYM", node);
-                if (node.ForName != null)
-                    AddRef(node.ForName, null, "SynonymFor");
-            }
-
-            public override void Visit(CreateTriggerStatement node)
-            {
-                AddDefine(node.Name, "TRIGGER", node);
-                var trgObj = node.TriggerObject;
-                if (trgObj != null && trgObj.Name != null)
-                    AddRef(trgObj.Name, null, "On");
-            }
-
-            // ALTER statements
-            public override void Visit(AlterTableAddTableElementStatement node) =>
-                AddDefine(node.SchemaObjectName, "TABLE", node);
-
-            public override void Visit(AlterViewStatement node)
-            {
-                if (node.SchemaObjectName != null)
-                    AddDefine(node.SchemaObjectName, "VIEW", node);
-            }
-
-            public override void Visit(AlterProcedureStatement node)
-            {
-                if (node.ProcedureReference != null && node.ProcedureReference.Name != null)
-                    AddDefine(node.ProcedureReference.Name, "PROC", node);
-            }
-
-            public override void Visit(AlterFunctionStatement node)
-            {
-                if (node.Name != null)
-                    AddDefine(node.Name, "FUNC", node);
-            }
-
-            // References
-            public override void Visit(NamedTableReference node)
-            {
-                if (node.SchemaObject != null)
-                    AddRef(node.SchemaObject, "TABLE_OR_VIEW", "ReadsFrom");
-            }
-
-            public override void Visit(InsertStatement node)
-            {
-                if (node.InsertSpecification != null &&
-                    node.InsertSpecification.Target is NamedTableReference t)
-                    AddRef(t.SchemaObject, "TABLE", "WritesTo");
-            }
-
-            public override void Visit(UpdateStatement node)
-            {
-                if (node.UpdateSpecification != null &&
-                    node.UpdateSpecification.Target is NamedTableReference t)
-                    AddRef(t.SchemaObject, "TABLE", "WritesTo");
-            }
-
-            public override void Visit(DeleteStatement node)
-            {
-                if (node.DeleteSpecification != null &&
-                    node.DeleteSpecification.Target is NamedTableReference t)
-                    AddRef(t.SchemaObject, "TABLE", "WritesTo");
-            }
-
-            public override void Visit(MergeStatement node)
-            {
-                var ms = node.MergeSpecification;
-                if (ms == null) return;
-
-                var t = ms.Target as NamedTableReference;
-                if (t != null)
-                    AddRef(t.SchemaObject, "TABLE", "WritesTo");
-
-                var s = ms.TableReference as NamedTableReference;
-                if (s != null)
-                    AddRef(s.SchemaObject, "TABLE_OR_VIEW", "ReadsFrom");
-            }
-
-            public override void Visit(ExecuteSpecification node)
-            {
-                var pr = node.ExecutableEntity as ExecutableProcedureReference;
-                if (pr != null &&
-                    pr.ProcedureReference != null &&
-                    pr.ProcedureReference.ProcedureReference != null &&
-                    pr.ProcedureReference.ProcedureReference.Name != null)
-                {
-                    var nm = pr.ProcedureReference.ProcedureReference.Name;
-                    AddRef(nm, "PROC", "Executes");
-                }
-            }
-        }
-
 
         private static void AppendEfEdgesAndNodes(
-          IEnumerable<string> codeRoots,
-          string outDir,
-          ConcurrentDictionary<string, NodeRow> nodes,
-          List<EdgeRow> edges)
+                  IEnumerable<string> codeRoots,
+                  string outDir,
+                  ConcurrentDictionary<string, NodeRow> nodes,
+                  List<EdgeRow> edges)
         {
             ConsoleLog.Info("EF stage: scanning C# files (mappings, DbSet, raw SQL, POCO entities).");
 
@@ -1232,66 +489,11 @@ namespace RoslynIndexer.Core.Sql
             }
         }
 
-        /// <summary>
-        /// Appends POCO ENTITY bodies to sql_bodies.jsonl.
-        /// Each artifact represents a single C# entity class that was treated as ENTITY
-        /// (either via DbSet&lt;T&gt; or configured EntityBaseTypes).
-        /// </summary>
-        private static void AppendEntityBodiesToJsonl(
-            string outputDir,
-            IReadOnlyList<EntityBodyArtifact> entityBodies)
-        {
-            if (string.IsNullOrWhiteSpace(outputDir))
-                return;
-
-            if (entityBodies == null || entityBodies.Count == 0)
-                return;
-
-            var docsDir = Path.Combine(outputDir, "docs");
-            Directory.CreateDirectory(docsDir);
-
-            // Same file as SQL and inline SQL bodies; POCO ENTITY entries are just another kind.
-            var bodiesPath = Path.Combine(docsDir, "sql_bodies.jsonl");
-
-            try
-            {
-                using (var stream = new FileStream(bodiesPath, FileMode.Append, FileAccess.Write, FileShare.Read))
-                using (var writer = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)))
-                {
-                    foreach (var e in entityBodies)
-                    {
-                        if (e == null)
-                            continue;
-
-                        var jsonObject = new
-                        {
-                            key = e.EntityKey,          // e.g. "csharp:Product|ENTITY"
-                            kind = "ENTITY",
-                            name = e.EntityName,
-                            @namespace = e.Namespace,
-                            typeFullName = e.TypeFullName,
-                            file = e.SourcePath,        // full C# path
-                            bodyPath = e.BodyRelPath,   // docs/bodies/Poco....
-                            body = e.Body               // raw C# class text
-                        };
-
-                        writer.WriteLine(JsonConvert.SerializeObject(jsonObject));
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                // Do not fail the entire indexer – POCO bodies are helpful but not critical.
-                ConsoleLog.Warn("ENTITY bodies (POCO): failed to append POCO bodies to sql_bodies.jsonl: " + ex.Message);
-            }
-        }
-
-
         private static void AppendEfMigrationEdgesAndNodes(
-         IEnumerable<string> codeRoots,
-         string outDir,
-         ConcurrentDictionary<string, NodeRow> nodes,
-         List<EdgeRow> edges)
+            IEnumerable<string> codeRoots,
+            string outDir,
+            ConcurrentDictionary<string, NodeRow> nodes,
+            List<EdgeRow> edges)
         {
             ConsoleLog.Info("EF-Migrations (v2): Roslyn-based EfMigrationAnalyzer…");
 
@@ -1358,9 +560,20 @@ namespace RoslynIndexer.Core.Sql
                 return;
             }
 
+            ConsoleLog.Info("EF-Migrations (v2): migrations roots:");
+            foreach (var root in effectiveRoots)
+                ConsoleLog.Info("  " + root);
+
+            var docsDir = Path.Combine(outDir, "docs");
+            var bodiesDir = Path.Combine(docsDir, "bodies");
+            Directory.CreateDirectory(docsDir);
+            Directory.CreateDirectory(bodiesDir);
+
             var analyzer = new EfMigrationAnalyzer();
             int addedMigrations = 0;
             int addedEdges = 0;
+
+            var migrationBodies = new List<MigrationBodyArtifact>();
 
             // 2) Primary path: use EfMigrationAnalyzer (for real projects like nopCommerce).
             foreach (var root in effectiveRoots)
@@ -1376,24 +589,58 @@ namespace RoslynIndexer.Core.Sql
                         if (mig == null || string.IsNullOrEmpty(mig.ClassName))
                             continue;
 
-                        var key = "csharp:" + mig.ClassName + "|MIGRATION";
+                        var migrationName = !string.IsNullOrEmpty(mig.TypeFullName)
+                            ? mig.TypeFullName
+                            : mig.ClassName;
 
-                        // Migration node
+                        var migrationKey = "csharp:" + migrationName + "|MIGRATION";
+
+                        // Prepare body file for Up(), if available.
+                        string bodyRelPath = null;
+                        var upBody = mig.UpBody ?? string.Empty;
+
+                        if (!string.IsNullOrWhiteSpace(upBody))
+                        {
+                            var safeName = new string(
+                                migrationName
+                                    .Select(ch => char.IsLetterOrDigit(ch) || ch == '.' || ch == '_' ? ch : '_')
+                                    .ToArray());
+
+                            var bodyFileName = $"Migration.{safeName}.MIGRATION.cs";
+                            var bodyAbs = Path.Combine(bodiesDir, bodyFileName);
+
+                            File.WriteAllText(bodyAbs, upBody, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+                            bodyRelPath = "docs/bodies/" + bodyFileName;
+
+                            // Register for sql_bodies.jsonl.
+                            migrationBodies.Add(
+                                new MigrationBodyArtifact(
+                                    migrationKey: migrationKey,
+                                    migrationName: mig.ClassName,
+                                    @namespace: mig.Namespace,
+                                    typeFullName: mig.TypeFullName,
+                                    sourcePath: string.IsNullOrEmpty(mig.SourcePath) ? (mig.FileRelativePath ?? string.Empty) : mig.SourcePath,
+                                    bodyRelPath: bodyRelPath,
+                                    body: upBody,
+                                    operations: mig.UpOperations));
+                        }
+
+                        // Migration node in the graph.
                         nodes.TryAdd(
-                            key,
+                            migrationKey,
                             new NodeRow(
-                                key: key,
+                                key: migrationKey,
                                 kind: "MIGRATION",
                                 name: mig.ClassName,
                                 schema: "csharp",
                                 file: mig.FileRelativePath ?? string.Empty,
                                 batch: null,
                                 domain: "code",
-                                bodyPath: null));
+                                bodyPath: bodyRelPath));
 
                         addedMigrations++;
 
-                        // Edges: use UpOperations (schema evolution "forward")
+                        // Edges: use UpOperations (schema evolution "forward").
                         foreach (var op in mig.UpOperations ?? Array.Empty<EfMigrationOperation>())
                         {
                             string relation;
@@ -1409,8 +656,9 @@ namespace RoslynIndexer.Core.Sql
 
                                 case EfMigrationOperationKind.RawSql:
                                 case EfMigrationOperationKind.Unknown:
+                                case EfMigrationOperationKind.DataChange:
                                 default:
-                                    // Raw SQL is preserved but we do not guess affected tables.
+                                    // Raw SQL and pure data changes are preserved only in the MIGRATION body summary.
                                     continue;
                             }
 
@@ -1422,7 +670,7 @@ namespace RoslynIndexer.Core.Sql
                             var toKey = "dbo." + tableName + "|TABLE";
 
                             edges.Add(new EdgeRow(
-                                from: key,
+                                from: migrationKey,
                                 to: toKey,
                                 relation: relation,
                                 toKind: "TABLE",
@@ -1439,8 +687,7 @@ namespace RoslynIndexer.Core.Sql
                 }
             }
 
-            // 3) Fallback path: for tiny test scaffolds (like MiniEf) where EfMigrationAnalyzer sees nothing,
-            //    we scan *.cs directly and look for *Migration classes + Schema.Table(...) calls.
+            // 3) Fallback path (MiniEf) – bez zmian, tylko korzysta z tych samych zmiennych
             if (addedMigrations == 0)
             {
                 int fallbackMigrations = 0;
@@ -1545,6 +792,9 @@ namespace RoslynIndexer.Core.Sql
                 }
             }
 
+            // 4) Persist MIGRATION bodies/summaries to sql_bodies.jsonl (historical source only).
+            AppendMigrationBodiesToJsonl(outDir, migrationBodies);
+
             ConsoleLog.Info(
                 "EF-Migrations (v2) finished: migrations=" + addedMigrations +
                 ", edges(Up)=" + addedEdges +
@@ -1553,51 +803,57 @@ namespace RoslynIndexer.Core.Sql
         }
 
         /// <summary>
-        /// New inline-SQL path: use InlineSqlScanner to produce SqlArtifact
-        /// and then project them onto the legacy graph via
-        /// AppendInlineSqlEdgesAndNodes_FromArtifacts.
+        /// Appends POCO ENTITY bodies to sql_bodies.jsonl.
+        /// Each artifact represents a single C# entity class that was treated as ENTITY
+        /// (either via DbSet&lt;T&gt; or configured EntityBaseTypes).
         /// </summary>
-        private static void AppendInlineSqlEdgesAndNodes_UsingScanner(
-                IEnumerable<string> inlineSqlRoots,
-                string sqlRoot,
-                IEnumerable<string>? extraHotMethods,
-                string outputDir,
-                ConcurrentDictionary<string, NodeRow> nodes,
-                List<EdgeRow> edges)
+        private static void AppendEntityBodiesToJsonl(
+            string outputDir,
+            IReadOnlyList<EntityBodyArtifact> entityBodies)
         {
-            if (inlineSqlRoots == null)
-            {
-                ConsoleLog.Info("Inline-SQL (scanner): inlineSql roots are null – skipped.");
+            if (string.IsNullOrWhiteSpace(outputDir))
                 return;
-            }
 
-            
-            var rootsList = inlineSqlRoots
-                .Where(r => !string.IsNullOrWhiteSpace(r))
-                .ToList();
-
-            if (rootsList.Count == 0)
-            {
-                ConsoleLog.Info("Inline-SQL (scanner): no non-empty inlineSql roots – skipped.");
+            if (entityBodies == null || entityBodies.Count == 0)
                 return;
+
+            var docsDir = Path.Combine(outputDir, "docs");
+            Directory.CreateDirectory(docsDir);
+
+            // Same file as SQL and inline SQL bodies; POCO ENTITY entries are just another kind.
+            var bodiesPath = Path.Combine(docsDir, "sql_bodies.jsonl");
+
+            try
+            {
+                using (var stream = new FileStream(bodiesPath, FileMode.Append, FileAccess.Write, FileShare.Read))
+                using (var writer = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)))
+                {
+                    foreach (var e in entityBodies)
+                    {
+                        if (e == null)
+                            continue;
+
+                        var jsonObject = new
+                        {
+                            key = e.EntityKey,          // e.g. "csharp:Product|ENTITY"
+                            kind = "ENTITY",
+                            name = e.EntityName,
+                            @namespace = e.Namespace,
+                            typeFullName = e.TypeFullName,
+                            file = e.SourcePath,        // full C# path
+                            bodyPath = e.BodyRelPath,   // docs/bodies/Poco....
+                            body = e.Body               // raw C# class text
+                        };
+
+                        writer.WriteLine(JsonConvert.SerializeObject(jsonObject));
+                    }
+                }
             }
-
-            // InlineSqlScanner przyjmuje jeden string z separatorami.
-            var rootsCombined = string.Join(";", rootsList);
-
-            ConsoleLog.Info($"Inline-SQL (scanner): scanning roots: {rootsCombined}");
-
-            var artifacts = InlineSqlScanner
-                .ScanInlineSql(rootsCombined, extraHotMethods)
-                .ToList();
-
-            AppendInlineSqlEdgesAndNodes_FromArtifacts(
-                artifacts: artifacts,
-                sqlRoot: sqlRoot,
-                nodes: nodes,
-                edges: edges);
-
-            AppendInlineSqlBodiesToJsonl(outputDir, artifacts);
+            catch (Exception ex)
+            {
+                // Do not fail the entire indexer – POCO bodies are helpful but not critical.
+                ConsoleLog.Warn("ENTITY bodies (POCO): failed to append POCO bodies to sql_bodies.jsonl: " + ex.Message);
+            }
         }
 
         // Appends inline-SQL entries to sql_bodies.jsonl and creates .sql body files
@@ -1691,8 +947,6 @@ namespace RoslynIndexer.Core.Sql
                 ConsoleLog.Warn("Inline-SQL (scanner): failed to append inline SQL bodies to sql_bodies.jsonl: " + ex.Message);
             }
         }
-
-
 
         /// <summary>
         /// Adapter that takes InlineSQL SqlArtifact instances (produced by InlineSqlScanner)
@@ -1799,6 +1053,956 @@ namespace RoslynIndexer.Core.Sql
 
             ConsoleLog.Info(
                 $"Inline-SQL (scanner): added {addedMethods} METHOD node(s) and {addedEdges} edge(s) from SqlArtifact stream.");
+        }
+
+        /// <summary>
+        /// New inline-SQL path: use InlineSqlScanner to produce SqlArtifact
+        /// and then project them onto the legacy graph via
+        /// AppendInlineSqlEdgesAndNodes_FromArtifacts.
+        /// </summary>
+        private static void AppendInlineSqlEdgesAndNodes_UsingScanner(
+                IEnumerable<string> inlineSqlRoots,
+                string sqlRoot,
+                IEnumerable<string>? extraHotMethods,
+                string outputDir,
+                ConcurrentDictionary<string, NodeRow> nodes,
+                List<EdgeRow> edges)
+        {
+            if (inlineSqlRoots == null)
+            {
+                ConsoleLog.Info("Inline-SQL (scanner): inlineSql roots are null – skipped.");
+                return;
+            }
+
+            var rootsList = inlineSqlRoots
+                .Where(r => !string.IsNullOrWhiteSpace(r))
+                .ToList();
+
+            if (rootsList.Count == 0)
+            {
+                ConsoleLog.Info("Inline-SQL (scanner): no non-empty inlineSql roots – skipped.");
+                return;
+            }
+
+            // InlineSqlScanner przyjmuje jeden string z separatorami.
+            var rootsCombined = string.Join(";", rootsList);
+
+            ConsoleLog.Info($"Inline-SQL (scanner): scanning roots: {rootsCombined}");
+
+            var artifacts = InlineSqlScanner
+                .ScanInlineSql(rootsCombined, extraHotMethods)
+                .ToList();
+
+            AppendInlineSqlEdgesAndNodes_FromArtifacts(
+                artifacts: artifacts,
+                sqlRoot: sqlRoot,
+                nodes: nodes,
+                edges: edges);
+
+            AppendInlineSqlBodiesToJsonl(outputDir, artifacts);
+        }
+
+        /// <summary>
+        /// Appends EF MIGRATION bodies (Up() methods) to sql_bodies.jsonl.
+        /// Each entry carries both raw C# body text and a simple structured summary
+        /// of affected tables/columns/foreign keys.
+        /// </summary>
+        private static void AppendMigrationBodiesToJsonl(
+            string outputDir,
+            IReadOnlyList<MigrationBodyArtifact> migrations)
+        {
+            if (string.IsNullOrWhiteSpace(outputDir))
+                return;
+
+            if (migrations == null || migrations.Count == 0)
+                return;
+
+            var docsDir = Path.Combine(outputDir, "docs");
+            Directory.CreateDirectory(docsDir);
+
+            var bodiesPath = Path.Combine(docsDir, "sql_bodies.jsonl");
+
+            try
+            {
+                using (var stream = new FileStream(bodiesPath, FileMode.Append, FileAccess.Write, FileShare.Read))
+                using (var writer = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)))
+                {
+                    foreach (var m in migrations)
+                    {
+                        if (m == null)
+                            continue;
+
+                        var createsTables = new List<string>();
+                        var dropsTables = new List<string>();
+                        var addsColumns = new List<object>();
+                        var dropsColumns = new List<object>();
+                        var renamesColumns = new List<object>();
+                        var addsForeignKeys = new List<object>();
+                        var dropsForeignKeys = new List<object>();
+
+                        foreach (var op in m.Operations ?? Array.Empty<EfMigrationOperation>())
+                        {
+                            if (op == null)
+                                continue;
+
+                            var opType = op.Operation ?? string.Empty;
+                            var canonicalTable = CanonicalTableName(op.Schema, op.Table);
+
+                            switch (opType)
+                            {
+                                case "CreateTable":
+                                    if (!string.IsNullOrWhiteSpace(canonicalTable))
+                                        createsTables.Add(canonicalTable);
+                                    break;
+
+                                case "DropTable":
+                                    if (!string.IsNullOrWhiteSpace(canonicalTable))
+                                        dropsTables.Add(canonicalTable);
+                                    break;
+
+                                case "AddColumn":
+                                    if (!string.IsNullOrWhiteSpace(canonicalTable) &&
+                                        !string.IsNullOrWhiteSpace(op.Column))
+                                    {
+                                        addsColumns.Add(new
+                                        {
+                                            table = canonicalTable,
+                                            column = op.Column
+                                        });
+                                    }
+                                    break;
+
+                                case "DropColumn":
+                                    if (!string.IsNullOrWhiteSpace(canonicalTable) &&
+                                        !string.IsNullOrWhiteSpace(op.Column))
+                                    {
+                                        dropsColumns.Add(new
+                                        {
+                                            table = canonicalTable,
+                                            column = op.Column
+                                        });
+                                    }
+                                    break;
+
+                                case "RenameColumn":
+                                    if (!string.IsNullOrWhiteSpace(canonicalTable) &&
+                                        !string.IsNullOrWhiteSpace(op.Column) &&
+                                        !string.IsNullOrWhiteSpace(op.NewColumn))
+                                    {
+                                        renamesColumns.Add(new
+                                        {
+                                            table = canonicalTable,
+                                            from = op.Column,
+                                            to = op.NewColumn
+                                        });
+                                    }
+                                    break;
+
+                                case "AddForeignKey":
+                                    if (!string.IsNullOrWhiteSpace(canonicalTable) &&
+                                        !string.IsNullOrWhiteSpace(op.ForeignKey))
+                                    {
+                                        addsForeignKeys.Add(new
+                                        {
+                                            table = canonicalTable,
+                                            foreignKey = op.ForeignKey
+                                        });
+                                    }
+                                    break;
+
+                                case "DropForeignKey":
+                                    if (!string.IsNullOrWhiteSpace(canonicalTable) &&
+                                        !string.IsNullOrWhiteSpace(op.ForeignKey))
+                                    {
+                                        dropsForeignKeys.Add(new
+                                        {
+                                            table = canonicalTable,
+                                            foreignKey = op.ForeignKey
+                                        });
+                                    }
+                                    break;
+
+                                default:
+                                    // Other operations (indexes, DataChange, RawSql, TouchTable-only)
+                                    // are kept in Raw field only; we can extend summary later if needed.
+                                    break;
+                            }
+                        }
+
+                        var jsonObject = new
+                        {
+                            key = m.MigrationKey,          // e.g. "csharp:MyApp.Migrations.AddCustomer|MIGRATION"
+                            kind = "MIGRATION",
+                            name = m.MigrationName,        // class name or full name (see caller)
+                            @namespace = m.Namespace,
+                            typeFullName = m.TypeFullName,
+                            file = m.SourcePath,           // full path to C# file
+                            bodyPath = m.BodyRelPath,      // docs/bodies/Migration....
+                            body = m.Body,                 // raw C# Up() method text
+
+                            // Structured summary of schema changes in Up():
+                            createsTables = createsTables,
+                            dropsTables = dropsTables,
+                            addsColumns = addsColumns,
+                            dropsColumns = dropsColumns,
+                            renamesColumns = renamesColumns,
+                            addsForeignKeys = addsForeignKeys,
+                            dropsForeignKeys = dropsForeignKeys
+                        };
+
+                        writer.WriteLine(JsonConvert.SerializeObject(jsonObject));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // MIGRATION summaries are helpful but must not break the indexer.
+                ConsoleLog.Warn("EF-Migrations bodies: failed to append migration bodies to sql_bodies.jsonl: " + ex.Message);
+            }
+        }
+
+        private static List<string> AutoDiscoverCodeRoots(string sqlRoot)
+        {
+            var results = new List<string>();
+
+            DirectoryInfo parent;
+            try
+            {
+                parent = Directory.GetParent(sqlRoot);
+            }
+            catch (Exception ex) when (ex is ArgumentException || ex is PathTooLongException)
+            {
+                ConsoleLog.Warn("AutoDiscoverCodeRoots: invalid sqlRoot '" + sqlRoot + "': " + ex.Message);
+                return results;
+            }
+
+            if (parent == null)
+                return results;
+
+            var p2 = parent.Parent ?? parent;
+            var p3 = p2.Parent ?? p2;
+            var src = p3.FullName;
+
+            var preferred = Path.Combine(src, "Server", "DataAccess");
+            var bases = Directory.Exists(preferred)
+                ? new[] { preferred }
+                : new[] { src };
+
+            string[] excludes = { "test", "tests", "example", "examples", "sample", "samples", "dev", "client", "tools" };
+
+            bool IsExcluded(string path) =>
+                path.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+                        StringSplitOptions.RemoveEmptyEntries)
+                    .Any(seg => excludes.Any(x =>
+                        string.Equals(seg, x, StringComparison.OrdinalIgnoreCase)));
+
+            string[] csproj;
+            try
+            {
+                csproj = bases
+                    .Where(Directory.Exists)
+                    .SelectMany(b => Directory.EnumerateFiles(b, "*.csproj", SearchOption.AllDirectories))
+                    .Where(p => p.IndexOf("\\bin\\", StringComparison.OrdinalIgnoreCase) < 0 &&
+                                p.IndexOf("/bin/", StringComparison.OrdinalIgnoreCase) < 0 &&
+                                p.IndexOf("\\obj\\", StringComparison.OrdinalIgnoreCase) < 0 &&
+                                p.IndexOf("/obj/", StringComparison.OrdinalIgnoreCase) < 0)
+                    .Where(p => !IsExcluded(p))
+                    .ToArray();
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                ConsoleLog.Warn("AutoDiscoverCodeRoots: unauthorized while enumerating *.csproj under "
+                    + string.Join(";", bases) + ": " + ex.Message);
+                csproj = Array.Empty<string>();
+            }
+            catch (IOException ex)
+            {
+                ConsoleLog.Warn("AutoDiscoverCodeRoots: IO error while enumerating *.csproj under "
+                    + string.Join(";", bases) + ": " + ex.Message);
+                csproj = Array.Empty<string>();
+            }
+
+            bool LooksLikeEfDir(string dir)
+            {
+                string[] files;
+                try
+                {
+                    files = Directory
+                        .EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories)
+                        .Take(300)
+                        .ToArray();
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    ConsoleLog.Warn("AutoDiscoverCodeRoots: unauthorized while enumerating *.cs under " + dir + ": " + ex.Message);
+                    return false;
+                }
+                catch (IOException ex)
+                {
+                    ConsoleLog.Warn("AutoDiscoverCodeRoots: IO error while enumerating *.cs under " + dir + ": " + ex.Message);
+                    return false;
+                }
+
+                foreach (var f in files)
+                {
+                    string txt;
+                    try
+                    {
+                        txt = File.ReadAllText(f);
+                    }
+                    catch (UnauthorizedAccessException ex)
+                    {
+                        ConsoleLog.Warn("AutoDiscoverCodeRoots: unauthorized while reading " + f + ": " + ex.Message);
+                        continue;
+                    }
+                    catch (IOException ex)
+                    {
+                        ConsoleLog.Warn("AutoDiscoverCodeRoots: IO error while reading " + f + ": " + ex.Message);
+                        continue;
+                    }
+
+                    if (Regex.IsMatch(txt, @"class\s+\w+\s*:\s*(\w+\.)*(Identity)?DbContext\b"))
+                        return true;
+
+                    if (txt.Contains(" DbSet<") || txt.Contains("\tDbSet<"))
+                        return true;
+                }
+
+                return false;
+            }
+
+            foreach (var proj in csproj)
+            {
+                var dir = Path.GetDirectoryName(proj);
+                if (string.IsNullOrEmpty(dir))
+                    continue;
+
+                try
+                {
+                    if (LooksLikeEfDir(dir))
+                        results.Add(dir);
+                }
+                catch (Exception ex) when (ex is UnauthorizedAccessException || ex is IOException)
+                {
+                    ConsoleLog.Warn("AutoDiscoverCodeRoots: error while scanning directory " + dir + ": " + ex.Message);
+                }
+            }
+
+            return results;
+        }
+
+        private static (ConcurrentDictionary<string, NodeRow>, List<EdgeRow>, int) BuildSqlKnowledge(string sqlRoot, string outDir)
+        {
+            ConsoleLog.Info("SQL stage: scanning .sql files…");
+            var ignore = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "Change Scripts","ChangeScripts","Initial Data","InitialData",
+                "Snapshots","Tools",".git",".vs","bin","obj"
+            };
+
+            IEnumerable<string> EnumerateSql(string dir)
+            {
+                foreach (var d in Directory.EnumerateDirectories(dir))
+                {
+                    var name = Path.GetFileName(d);
+                    if (ignore.Contains(name)) continue;
+                    foreach (var p in EnumerateSql(d))
+                        yield return p;
+                }
+
+                foreach (var f in Directory.EnumerateFiles(dir, "*.sql"))
+                    yield return f;
+            }
+
+            var files = EnumerateSql(sqlRoot).ToArray();
+            ConsoleLog.Info("Found SQL files: " + files.Length);
+
+            var nodes = new ConcurrentDictionary<string, NodeRow>(StringComparer.OrdinalIgnoreCase);
+            var edges = new ConcurrentBag<EdgeRow>();
+            var definedKinds = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            var parser = new TSql150Parser(true);
+            var bodiesDir = Path.Combine(outDir, "docs", "bodies");
+            var bodiesJsonl = Path.Combine(outDir, "docs", "sql_bodies.jsonl");
+            Directory.CreateDirectory(bodiesDir);
+            int bodiesCount = 0;
+
+            using (var bodiesWriter = new StreamWriter(bodiesJsonl, false, new UTF8Encoding(false)))
+            {
+                files
+                    .AsParallel()
+                    .WithDegreeOfParallelism(Environment.ProcessorCount)
+                    .ForAll(path =>
+                    {
+                        try
+                        {
+                            var sql = ReadAndPreprocess(path);
+                            IList<ParseError> errors;
+                            using (var sr = new StringReader(sql))
+                            {
+                                var fragment = parser.Parse(sr, out errors);
+                                if (errors != null && errors.Count > 0)
+                                {
+                                    var msg = string.Join("; ",
+                                        errors.Take(2).Select(e => e.Message + " (L" + e.Line + ",C" + e.Column + ")"));
+                                    ConsoleLog.Warn("[" + Path.GetFileName(path) + "] parser errors: " + msg);
+                                }
+
+                                var script = fragment as TSqlScript;
+                                if (script == null) return;
+                                var domain = DeriveDomain(sqlRoot, path);
+                                var isPrePost = IsPreOrPostDeployment(path);
+
+                                for (int bi = 0; bi < script.Batches.Count; bi++)
+                                {
+                                    var batch = script.Batches[bi];
+                                    var collector = new RefCollector();
+                                    batch.Accept(collector);
+
+                                    List<Tuple<SchemaObjectName, string, TSqlFragment>> defines;
+                                    if (collector.Defines.Count > 0)
+                                    {
+                                        defines = collector.Defines;
+                                    }
+                                    else
+                                    {
+                                        var pseudo = MakePseudoDefine(path, bi, isPrePost ? "DEPLOY" : "BATCH");
+                                        defines = new List<Tuple<SchemaObjectName, string, TSqlFragment>> { pseudo };
+                                    }
+
+                                    foreach (var def in defines)
+                                    {
+                                        var key = Key(def.Item1, def.Item2);
+                                        var schema = def.Item1.SchemaIdentifier != null
+                                            ? def.Item1.SchemaIdentifier.Value
+                                            : "dbo";
+                                        var name = def.Item1.BaseIdentifier != null
+                                            ? def.Item1.BaseIdentifier.Value
+                                            : "(anon)";
+
+                                        string bodyRelPath = null;
+                                        if (IsBodyKind(def.Item2))
+                                        {
+                                            var fileName = schema + "." + name + "." + def.Item2 + ".sql";
+                                            var bodyAbs = Path.Combine(bodiesDir, fileName);
+                                            string scripted;
+                                            lock (SqlGen)
+                                            {
+                                                SqlGen.GenerateScript(def.Item3, out scripted);
+                                                File.WriteAllText(bodyAbs, scripted, new UTF8Encoding(false));
+                                            }
+
+                                            bodyRelPath = "docs/bodies/" + fileName;
+
+                                            lock (bodiesWriter)
+                                            {
+                                                var obj = new
+                                                {
+                                                    key,
+                                                    kind = def.Item2,
+                                                    schema,
+                                                    name,
+                                                    domain,
+                                                    file = path,
+                                                    body = File.ReadAllText(bodyAbs, Encoding.UTF8)
+                                                };
+                                                bodiesWriter.WriteLine(JsonConvert.SerializeObject(obj));
+                                                bodiesCount++;
+                                            }
+                                        }
+
+                                        var node = new NodeRow(key, def.Item2, name, schema, path, bi, domain, bodyRelPath);
+                                        nodes.TryAdd(key, node);
+                                        definedKinds.TryAdd(NameKey(def.Item1), def.Item2);
+
+                                        foreach (var r in collector.References)
+                                        {
+                                            var toKeyBase = NameKey(r.Item1);
+                                            var toKind = r.Item2 ?? "UNKNOWN";
+                                            edges.Add(new EdgeRow(
+                                                from: key,
+                                                to: toKeyBase + "|" + toKind,
+                                                relation: r.Item3 ?? "Uses",
+                                                toKind: toKind,
+                                                file: path,
+                                                batch: bi
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            ConsoleLog.Error("[SQL:" + Path.GetFileName(path) + "] " + ex.Message);
+                        }
+                    });
+            }
+
+            // resolve kinds on edges + dedupe
+            var fixedEdges = new List<EdgeRow>(edges.Count);
+            foreach (var e in edges)
+            {
+                var split = SplitToNameAndKind(e.To);
+                var baseName = split.Item1;
+                var _kind = split.Item2;
+
+                if (definedKinds.TryGetValue(baseName, out var realKind))
+                {
+                    fixedEdges.Add(new EdgeRow(
+                        e.From,
+                        baseName + "|" + realKind,
+                        e.Relation,
+                        realKind,
+                        e.File,
+                        e.Batch));
+                }
+                else
+                {
+                    fixedEdges.Add(e);
+                }
+            }
+
+            fixedEdges = fixedEdges
+                .GroupBy(x => x.From + "|" + x.To + "|" + x.Relation)
+                .Select(g => g.First())
+                .ToList();
+
+            // ensure missing target nodes exist
+            foreach (var e in fixedEdges)
+            {
+                if (!nodes.ContainsKey(e.To))
+                {
+                    var pair = SplitToNameAndKind(e.To);
+                    var baseName = pair.Item1;
+                    var kind = pair.Item2;
+                    var sn = SplitSchemaAndName(baseName);
+                    var schema = sn.Item1;
+                    var name = sn.Item2;
+
+                    nodes.TryAdd(
+                        e.To,
+                        new NodeRow(e.To, kind, name, schema, null, null, "(external)", null));
+                }
+            }
+
+            ConsoleLog.Info("SQL stage finished: nodes=" + nodes.Count + ", edges=" + fixedEdges.Count + ", bodies=" + bodiesCount);
+            return (nodes, fixedEdges, bodiesCount);
+        }
+
+        /// <summary>
+        /// Produces a canonical "schema.table" representation.
+        /// If table already contains a dot, it is returned unchanged.
+        /// </summary>
+        private static string CanonicalTableName(string schema, string table)
+        {
+            if (string.IsNullOrWhiteSpace(table))
+                return null;
+
+            if (table.Contains("."))
+                return table;
+
+            var s = string.IsNullOrWhiteSpace(schema) ? "dbo" : schema;
+            return s + "." + table;
+        }
+
+        private static string Csv(params object[] vals)
+                    => string.Join(",", vals.Select(v =>
+                        "\"" + ((v != null ? v.ToString() : string.Empty).Replace("\"", "\"\"")) + "\""));
+
+        private static string DeriveDomain(string root, string file)
+        {
+            var rel = GetRelativePathSafe(root, file);
+            var parts = rel.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+                StringSplitOptions.RemoveEmptyEntries);
+            return parts.Length > 1 ? parts[0] : string.Empty;
+        }
+
+        private static Dictionary<string, Tuple<string, string>> ExtractEntityMappings(List<SyntaxTree> trees)
+        {
+            var map = new Dictionary<string, Tuple<string, string>>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var t in trees)
+            {
+                var root = t.GetRoot();
+
+                // [Table("Name", Schema="dbo")]
+                foreach (var cls in root.DescendantNodes().OfType<ClassDeclarationSyntax>())
+                {
+                    var attr = cls.AttributeLists
+                        .SelectMany(a => a.Attributes)
+                        .FirstOrDefault(a =>
+                            a.Name.ToString().EndsWith("Table") ||
+                            a.Name.ToString().EndsWith("TableAttribute"));
+
+                    if (attr != null)
+                    {
+                        var nameArgSyntax =
+                            attr.ArgumentList != null && attr.ArgumentList.Arguments.Count > 0
+                                ? attr.ArgumentList.Arguments[0]
+                                : null;
+
+                        var nameArg = nameArgSyntax != null
+                            ? nameArgSyntax.ToString().Trim('"', '\'')
+                            : null;
+
+                        var schema = "dbo";
+                        var schemaArg = attr.ArgumentList != null
+                            ? attr.ArgumentList.Arguments.FirstOrDefault(a =>
+                                a.ToString().StartsWith("Schema", StringComparison.OrdinalIgnoreCase))
+                            : null;
+
+                        if (schemaArg != null)
+                        {
+                            var s = schemaArg.ToString();
+                            var idx = s.IndexOf('=');
+                            if (idx > 0)
+                                schema = s.Substring(idx + 1).Trim().Trim('"', '\'');
+                        }
+
+                        if (!string.IsNullOrEmpty(nameArg))
+                            map[FullName(cls)] = Tuple.Create(schema, nameArg);
+                    }
+                }
+
+                // Fluent API: modelBuilder.Entity<T>().ToTable("Name","Schema")
+                foreach (var inv in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
+                {
+                    var ma = inv.Expression as MemberAccessExpressionSyntax;
+                    if (ma != null &&
+                        ma.Name.Identifier.Text == "ToTable" &&
+                        inv.ArgumentList != null &&
+                        inv.ArgumentList.Arguments.Count >= 1)
+                    {
+                        var args = inv.ArgumentList.Arguments;
+                        var name = args[0].ToString().Trim('"', '\'');
+                        var schema = args.Count >= 2
+                            ? args[1].ToString().Trim('"', '\'')
+                            : "dbo";
+
+                        var ent = ma.Expression as InvocationExpressionSyntax;
+                        var ma2 = ent != null ? ent.Expression as MemberAccessExpressionSyntax : null;
+                        if (ma2 != null &&
+                            ma2.Name.Identifier.Text == "Entity" &&
+                            ent.ArgumentList != null &&
+                            ent.ArgumentList.Arguments.Count == 1)
+                        {
+                            var arg = ent.ArgumentList.Arguments[0].ToString();
+                            string type;
+                            if (arg.Contains("typeof"))
+                            {
+                                var open = arg.IndexOf('(');
+                                var close = arg.IndexOf(')');
+                                if (open >= 0 && close > open)
+                                    type = arg.Substring(open + 1, close - open - 1);
+                                else
+                                    type = arg;
+                            }
+                            else
+                            {
+                                type = arg.Trim('<', '>');
+                            }
+
+                            map[type] = Tuple.Create(schema, name);
+                        }
+                    }
+                }
+            }
+
+            return map;
+        }
+
+        private static string FullName(ClassDeclarationSyntax cls)
+        {
+            var nsDecl = cls.FirstAncestorOrSelf<NamespaceDeclarationSyntax>();
+            var ns = nsDecl != null ? nsDecl.Name.ToString() : null;
+            return string.IsNullOrEmpty(ns) ? cls.Identifier.Text : ns + "." + cls.Identifier.Text;
+        }
+
+        private static string? GetContainingTypeName(SyntaxNode node)
+        {
+            var current = node.Parent;
+            while (current != null)
+            {
+                if (current is TypeDeclarationSyntax t)
+                    return t.Identifier.ValueText;
+
+                current = current.Parent;
+            }
+
+            return null;
+        }
+
+        private static string? GetNamespace(SyntaxNode node)
+        {
+            var current = node.Parent;
+            while (current != null)
+            {
+                if (current is NamespaceDeclarationSyntax ns)
+                    return ns.Name.ToString();
+
+                if (current is FileScopedNamespaceDeclarationSyntax fns)
+                    return fns.Name.ToString();
+
+                current = current.Parent;
+            }
+
+            return null;
+        }
+
+        // ===== Utilities =====
+        private static string GetRelativePathSafe(string baseDir, string fullPath)
+        {
+            try
+            {
+                var baseUri = new Uri(AppendDirSep(baseDir));
+                var pathUri = new Uri(fullPath);
+                var rel = Uri.UnescapeDataString(baseUri.MakeRelativeUri(pathUri).ToString());
+                return rel.Replace('/', Path.DirectorySeparatorChar);
+            }
+            catch
+            {
+                return fullPath;
+            }
+        }
+
+        private static bool IsBodyKind(string kind)
+                    => kind == "PROC" || kind == "FUNC" || kind == "VIEW" ||
+                       kind == "TRIGGER" || kind == "TABLE" || kind == "SEQUENCE" || kind == "TYPE";
+
+        private static bool IsDirectoryEmpty(string path)
+        {
+            try { return !Directory.EnumerateFileSystemEntries(path).Any(); }
+            catch { return true; }
+        }
+
+        private static bool IsPreOrPostDeployment(string p)
+        {
+            var name = Path.GetFileName(p);
+            return name.Equals("PreDeployment.sql", StringComparison.OrdinalIgnoreCase)
+                   || name.Equals("PostDeployment.sql", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string Key(SchemaObjectName n, string kind) => NameKey(n) + "|" + kind;
+
+        private static bool LooksLikeSqlLiteral(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return false;
+
+            var v = value.Trim();
+
+            // Very small, cheap heuristic – enough for our test sample
+            // and safe not to treat normal text as SQL.
+            v = v.ToLowerInvariant();
+            return v.Contains("select ")
+                   || v.Contains("insert ")
+                   || v.Contains("update ")
+                   || v.Contains("delete ")
+                   || v.Contains("merge ")
+                   || v.Contains("from ")
+                   || v.Contains("into ");
+        }
+
+        private static Tuple<SchemaObjectName, string, TSqlFragment> MakePseudoDefine(string file, int bi, string kind)
+        {
+            var n = new SchemaObjectName();
+            n.Identifiers.Add(new Identifier { Value = "dbo" });
+            n.Identifiers.Add(new Identifier
+            {
+                Value = "__" + kind.ToLowerInvariant() + "__:" + Path.GetFileName(file) + ":" + bi
+            });
+            return Tuple.Create(n, kind, (TSqlFragment)new TSqlScript());
+        }
+
+        private static string NameKey(SchemaObjectName n)
+        {
+            var db = n.DatabaseIdentifier != null ? n.DatabaseIdentifier.Value : null;
+            var schema = n.SchemaIdentifier != null ? n.SchemaIdentifier.Value : "dbo";
+            var name = n.BaseIdentifier != null ? n.BaseIdentifier.Value : "(anon)";
+            return (db != null ? db + "." : "") + schema + "." + name;
+        }
+
+        private static string NormalizeDir(string p)
+        {
+            var full = Path.GetFullPath(p);
+            return full.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        }
+
+        private static string ReadAndPreprocess(string path)
+        {
+            var text = File.ReadAllText(path);
+            var sb = new StringBuilder();
+
+            foreach (var raw in text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+            {
+                if (Regex.IsMatch(raw, @"^\s*:(r|setvar|connect|on\s+error\s+exit)\b",
+                        RegexOptions.IgnoreCase))
+                    continue;
+
+                sb.AppendLine(raw);
+            }
+
+            var cleaned = sb.ToString();
+            cleaned = Regex.Replace(cleaned, @"\$\([^)]+\)", "0");
+            return cleaned;
+        }
+
+        // ====== Build orchestration (legacy parity) ======
+        private static int RunBuild(string outputDir, string sqlProjectRoot, string efRoot = "")
+        {
+            var outGraph = Path.Combine(outputDir, "graph");
+            var outDocs = Path.Combine(outputDir, "docs");
+            Directory.CreateDirectory(outGraph);
+            Directory.CreateDirectory(outDocs);
+            Directory.CreateDirectory(Path.Combine(outDocs, "bodies"));
+
+            var sqlRoot = NormalizeDir(sqlProjectRoot);
+            if (!Directory.Exists(sqlRoot))
+            {
+                ConsoleLog.Error("Provided sqlProjectRoot does not exist: " + sqlRoot);
+                return 1;
+            }
+
+            ConsoleLog.Info("SQL root: " + sqlRoot);
+            ConsoleLog.Info("Out dir : " + outputDir);
+
+            // 1) SQL indexing
+            var (nodes, edges, bodiesJsonlCount) = BuildSqlKnowledge(sqlRoot, outputDir);
+
+            // 2) EF autodiscovery / explicit root
+            List<string> codeRoots;
+            if (!string.IsNullOrWhiteSpace(efRoot))
+            {
+                if (File.Exists(efRoot) &&
+                    Path.GetExtension(efRoot).Equals(".csproj", StringComparison.OrdinalIgnoreCase))
+                {
+                    efRoot = Path.GetDirectoryName(efRoot);
+                }
+
+                var efDir = NormalizeDir(efRoot);
+
+                if (!Directory.Exists(efDir))
+                {
+                    ConsoleLog.Warn("Provided efRoot does not exist: " + efDir + " — falling back to autodiscovery.");
+                    codeRoots = AutoDiscoverCodeRoots(sqlRoot);
+                }
+                else if (IsDirectoryEmpty(efDir))
+                {
+                    ConsoleLog.Warn("Provided efRoot directory is empty: " + efDir + " — falling back to autodiscovery.");
+                    codeRoots = AutoDiscoverCodeRoots(sqlRoot);
+                }
+                else
+                {
+                    codeRoots = new List<string> { efDir };
+                }
+            }
+            else
+            {
+                codeRoots = AutoDiscoverCodeRoots(sqlRoot);
+            }
+
+            if (codeRoots.Count > 0)
+            {
+                ConsoleLog.Info("EF code roots:");
+                foreach (var cr in codeRoots)
+                    ConsoleLog.Info("  " + cr);
+
+                AppendEfEdgesAndNodes(codeRoots, outputDir, nodes, edges);
+                AppendEfMigrationEdgesAndNodes(codeRoots, outputDir, nodes, edges);
+            }
+            else
+            {
+                ConsoleLog.Info("No EF code roots detected – EF stage skipped.");
+            }
+
+            // 3) Inline-SQL (C# methods with raw SQL literals)
+            if (GlobalInlineSqlRoots != null && GlobalInlineSqlRoots.Length > 0)
+            {
+                // Docelowo zawsze używamy InlineSqlScanner + adaptera.
+                AppendInlineSqlEdgesAndNodes_UsingScanner(
+                 inlineSqlRoots: GlobalInlineSqlRoots,
+                 sqlRoot: sqlRoot,
+                 extraHotMethods: GlobalInlineSqlHotMethods,
+                 outputDir: outputDir,
+                 nodes: nodes,
+                 edges: edges);
+            }
+            else
+            {
+                ConsoleLog.Info("Inline-SQL: no inlineSql roots configured – skipped.");
+            }
+
+            WriteGraph(outputDir, nodes.Values, edges);
+            WriteManifest(
+                outDir: outputDir,
+                sqlRoot: sqlRoot,
+                codeRoots: codeRoots,
+                nodeCount: nodes.Count,
+                edgeCount: edges.Count,
+                bodiesCount: bodiesJsonlCount);
+
+            ConsoleLog.Info("LegacySqlIndexer finished.");
+            return 0;
+        }
+
+        private static Tuple<string, string> SplitSchemaAndName(string baseName)
+        {
+            var parts = baseName.Split('.');
+            if (parts.Length == 3) return Tuple.Create(parts[1], parts[2]);
+            if (parts.Length == 2) return Tuple.Create(parts[0], parts[1]);
+            return Tuple.Create("dbo", parts[parts.Length - 1]);
+        }
+
+        private static Tuple<string, string> SplitToNameAndKind(string key)
+        {
+            var i = key.LastIndexOf('|');
+            if (i >= 0)
+                return Tuple.Create(key.Substring(0, i), key.Substring(i + 1));
+
+            return Tuple.Create(key, "UNKNOWN");
+        }
+
+        private static string ToRel(string p) => p == null ? null : p.Replace('\\', '/');
+
+        /// <summary>
+        /// Parses InlineSQL identifier created by InlineSqlScanner.AnalyzeSqlSnippet, e.g.:
+        ///   "dbo.Customer|TABLE_OR_VIEW|inline@Some/File.cs:L42"
+        /// Returns schema, name and kind suitable for graph keys.
+        /// </summary>
+        private static bool TryParseInlineSqlIdentifier(
+            string identifier,
+            out string schema,
+            out string name,
+            out string kind)
+        {
+            schema = "dbo";
+            name = string.Empty;
+            kind = "TABLE_OR_VIEW";
+
+            if (string.IsNullOrWhiteSpace(identifier))
+                return false;
+
+            // Expected format:
+            //   {schema}.{name}|{kind}|inline@{relPath}:L{line}
+            var parts = identifier.Split('|');
+            if (parts.Length < 3)
+                return false;
+
+            var objectId = parts[0];   // e.g. "dbo.Customer"
+            var kindPart = parts[1];   // e.g. "TABLE", "TABLE_OR_VIEW", "PROC"
+
+            if (!string.IsNullOrWhiteSpace(kindPart))
+                kind = kindPart;
+
+            var dotIndex = objectId.IndexOf('.');
+            if (dotIndex <= 0 || dotIndex == objectId.Length - 1)
+                return false;
+
+            schema = objectId.Substring(0, dotIndex);
+            name = objectId.Substring(dotIndex + 1);
+
+            return !string.IsNullOrWhiteSpace(name);
         }
 
         /// <summary>
@@ -1929,201 +2133,138 @@ namespace RoslynIndexer.Core.Sql
             }
         }
 
-        private static string? GetNamespace(SyntaxNode node)
+        // ========================================================
+        //  Persist
+        // ========================================================
+        private static void WriteGraph(string outDir, IEnumerable<NodeRow> nodes, IEnumerable<EdgeRow> edges)
         {
-            var current = node.Parent;
-            while (current != null)
+            var graphDir = Path.Combine(outDir, "graph");
+            Directory.CreateDirectory(graphDir);
+
+            var nodesCsv = Path.Combine(graphDir, "nodes.csv");
+            var edgesCsv = Path.Combine(graphDir, "edges.csv");
+            var graphJson = Path.Combine(graphDir, "graph.json");
+
+            File.WriteAllLines(
+                nodesCsv,
+                (new[] { "key,kind,name,schema,file,batch,domain,body_path" })
+                    .Concat(nodes.OrderBy(n => n.Key)
+                        .Select(n => Csv(n.Key, n.Kind, n.Name, n.Schema, ToRel(n.File), n.Batch, n.Domain, n.BodyPath))));
+
+            File.WriteAllLines(
+                edgesCsv,
+                (new[] { "from,to,relation,to_kind,file,batch" })
+                    .Concat(edges.OrderBy(e => e.From).ThenBy(e => e.To)
+                        .Select(e => Csv(e.From, e.To, e.Relation, e.ToKind, ToRel(e.File), e.Batch))));
+
+            var graph = new
             {
-                if (current is NamespaceDeclarationSyntax ns)
-                    return ns.Name.ToString();
+                nodes = nodes.OrderBy(n => n.Key).ToArray(),
+                edges = edges.OrderBy(e => e.From).ThenBy(e => e.To).ToArray()
+            };
 
-                if (current is FileScopedNamespaceDeclarationSyntax fns)
-                    return fns.Name.ToString();
-
-                current = current.Parent;
-            }
-
-            return null;
+            File.WriteAllText(graphJson, JsonConvert.SerializeObject(graph, Formatting.Indented));
+            ConsoleLog.Info("Written graph artifacts: " + nodesCsv + " | " + edgesCsv + " | " + graphJson);
         }
 
-        private static string? GetContainingTypeName(SyntaxNode node)
+        private static void WriteManifest(
+                    string outDir,
+                    string sqlRoot,
+                    List<string> codeRoots,
+                    int nodeCount,
+                    int edgeCount,
+                    int bodiesCount)
         {
-            var current = node.Parent;
-            while (current != null)
+            var manifestObj = new
             {
-                if (current is TypeDeclarationSyntax t)
-                    return t.Identifier.ValueText;
+                schema = 1,
+                builtAt = DateTimeOffset.Now.ToString("o"),
+                sqlRoot,
+                codeRoots,
+                counts = new { nodes = nodeCount, edges = edgeCount, docs = bodiesCount }
+            };
 
-                current = current.Parent;
-            }
-
-            return null;
+            var manifestPath = Path.Combine(outDir, "manifest.json");
+            File.WriteAllText(manifestPath, JsonConvert.SerializeObject(manifestObj, Formatting.Indented));
+            ConsoleLog.Info("Manifest written: " + manifestPath);
         }
 
-
-        /// <summary>
-        /// Parses InlineSQL identifier created by InlineSqlScanner.AnalyzeSqlSnippet, e.g.:
-        ///   "dbo.Customer|TABLE_OR_VIEW|inline@Some/File.cs:L42"
-        /// Returns schema, name and kind suitable for graph keys.
-        /// </summary>
-        private static bool TryParseInlineSqlIdentifier(
-            string identifier,
-            out string schema,
-            out string name,
-            out string kind)
+        private sealed class EdgeRow
         {
-            schema = "dbo";
-            name = string.Empty;
-            kind = "TABLE_OR_VIEW";
-
-            if (string.IsNullOrWhiteSpace(identifier))
-                return false;
-
-            // Expected format:
-            //   {schema}.{name}|{kind}|inline@{relPath}:L{line}
-            var parts = identifier.Split('|');
-            if (parts.Length < 3)
-                return false;
-
-            var objectId = parts[0];   // e.g. "dbo.Customer"
-            var kindPart = parts[1];   // e.g. "TABLE", "TABLE_OR_VIEW", "PROC"
-
-            if (!string.IsNullOrWhiteSpace(kindPart))
-                kind = kindPart;
-
-            var dotIndex = objectId.IndexOf('.');
-            if (dotIndex <= 0 || dotIndex == objectId.Length - 1)
-                return false;
-
-            schema = objectId.Substring(0, dotIndex);
-            name = objectId.Substring(dotIndex + 1);
-
-            return !string.IsNullOrWhiteSpace(name);
-        }
-
-
-
-
-
-        private static bool LooksLikeSqlLiteral(string value)
-        {
-            if (string.IsNullOrWhiteSpace(value))
-                return false;
-
-            var v = value.Trim();
-
-            // Very small, cheap heuristic – enough for our test sample
-            // and safe not to treat normal text as SQL.
-            v = v.ToLowerInvariant();
-            return v.Contains("select ")
-                   || v.Contains("insert ")
-                   || v.Contains("update ")
-                   || v.Contains("delete ")
-                   || v.Contains("merge ")
-                   || v.Contains("from ")
-                   || v.Contains("into ");
-        }
-
-
-        private static Dictionary<string, Tuple<string, string>> ExtractEntityMappings(List<SyntaxTree> trees)
-        {
-            var map = new Dictionary<string, Tuple<string, string>>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (var t in trees)
+            public int? Batch;
+            public string File;
+            public string From;
+            public string Relation;
+            public string To;
+            public string ToKind;
+            public EdgeRow(string from, string to, string relation, string toKind, string file, int? batch)
             {
-                var root = t.GetRoot();
-
-                // [Table("Name", Schema="dbo")]
-                foreach (var cls in root.DescendantNodes().OfType<ClassDeclarationSyntax>())
-                {
-                    var attr = cls.AttributeLists
-                        .SelectMany(a => a.Attributes)
-                        .FirstOrDefault(a =>
-                            a.Name.ToString().EndsWith("Table") ||
-                            a.Name.ToString().EndsWith("TableAttribute"));
-
-                    if (attr != null)
-                    {
-                        var nameArgSyntax =
-                            attr.ArgumentList != null && attr.ArgumentList.Arguments.Count > 0
-                                ? attr.ArgumentList.Arguments[0]
-                                : null;
-
-                        var nameArg = nameArgSyntax != null
-                            ? nameArgSyntax.ToString().Trim('"', '\'')
-                            : null;
-
-                        var schema = "dbo";
-                        var schemaArg = attr.ArgumentList != null
-                            ? attr.ArgumentList.Arguments.FirstOrDefault(a =>
-                                a.ToString().StartsWith("Schema", StringComparison.OrdinalIgnoreCase))
-                            : null;
-
-                        if (schemaArg != null)
-                        {
-                            var s = schemaArg.ToString();
-                            var idx = s.IndexOf('=');
-                            if (idx > 0)
-                                schema = s.Substring(idx + 1).Trim().Trim('"', '\'');
-                        }
-
-                        if (!string.IsNullOrEmpty(nameArg))
-                            map[FullName(cls)] = Tuple.Create(schema, nameArg);
-                    }
-                }
-
-                // Fluent API: modelBuilder.Entity<T>().ToTable("Name","Schema")
-                foreach (var inv in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
-                {
-                    var ma = inv.Expression as MemberAccessExpressionSyntax;
-                    if (ma != null &&
-                        ma.Name.Identifier.Text == "ToTable" &&
-                        inv.ArgumentList != null &&
-                        inv.ArgumentList.Arguments.Count >= 1)
-                    {
-                        var args = inv.ArgumentList.Arguments;
-                        var name = args[0].ToString().Trim('"', '\'');
-                        var schema = args.Count >= 2
-                            ? args[1].ToString().Trim('"', '\'')
-                            : "dbo";
-
-                        var ent = ma.Expression as InvocationExpressionSyntax;
-                        var ma2 = ent != null ? ent.Expression as MemberAccessExpressionSyntax : null;
-                        if (ma2 != null &&
-                            ma2.Name.Identifier.Text == "Entity" &&
-                            ent.ArgumentList != null &&
-                            ent.ArgumentList.Arguments.Count == 1)
-                        {
-                            var arg = ent.ArgumentList.Arguments[0].ToString();
-                            string type;
-                            if (arg.Contains("typeof"))
-                            {
-                                var open = arg.IndexOf('(');
-                                var close = arg.IndexOf(')');
-                                if (open >= 0 && close > open)
-                                    type = arg.Substring(open + 1, close - open - 1);
-                                else
-                                    type = arg;
-                            }
-                            else
-                            {
-                                type = arg.Trim('<', '>');
-                            }
-
-                            map[type] = Tuple.Create(schema, name);
-                        }
-                    }
-                }
+                From = from;
+                To = to;
+                Relation = relation;
+                ToKind = toKind;
+                File = file;
+                Batch = batch;
             }
-
-            return map;
         }
 
-        private static string FullName(ClassDeclarationSyntax cls)
+        private sealed class EntityBodyArtifact
         {
-            var nsDecl = cls.FirstAncestorOrSelf<NamespaceDeclarationSyntax>();
-            var ns = nsDecl != null ? nsDecl.Name.ToString() : null;
-            return string.IsNullOrEmpty(ns) ? cls.Identifier.Text : ns + "." + cls.Identifier.Text;
+            public string Body;
+            public string BodyRelPath;
+            public string EntityKey;
+            public string EntityName;
+            public string? Namespace;
+            public string SourcePath;
+            public string? TypeFullName;
+            public EntityBodyArtifact(
+                string entityKey,
+                string entityName,
+                string? @namespace,
+                string? typeFullName,
+                string sourcePath,
+                string bodyRelPath,
+                string body)
+            {
+                EntityKey = entityKey;
+                EntityName = entityName;
+                Namespace = @namespace;
+                TypeFullName = typeFullName;
+                SourcePath = sourcePath;
+                BodyRelPath = bodyRelPath;
+                Body = body;
+            }
+        }
+
+        private sealed class MigrationBodyArtifact
+        {
+            public string Body;
+            public string BodyRelPath;
+            public string MigrationKey;
+            public string MigrationName;
+            public string Namespace;
+            public IList<EfMigrationOperation> Operations;
+            public string SourcePath;
+            public string TypeFullName;
+            public MigrationBodyArtifact(
+                string migrationKey,
+                string migrationName,
+                string @namespace,
+                string typeFullName,
+                string sourcePath,
+                string bodyRelPath,
+                string body,
+                IList<EfMigrationOperation> operations)
+            {
+                MigrationKey = migrationKey;
+                MigrationName = migrationName;
+                Namespace = @namespace;
+                TypeFullName = typeFullName;
+                SourcePath = sourcePath;
+                BodyRelPath = bodyRelPath;
+                Body = body;
+                Operations = operations ?? Array.Empty<EfMigrationOperation>();
+            }
         }
 
         // ====== EF raw-SQL mini collector ======
@@ -2209,89 +2350,173 @@ namespace RoslynIndexer.Core.Sql
             }
         }
 
-        // ========================================================
-        //  Persist
-        // ========================================================
-        private static void WriteGraph(string outDir, IEnumerable<NodeRow> nodes, IEnumerable<EdgeRow> edges)
+        // ====== data rows (classes instead of records) ======
+        private sealed class NodeRow
         {
-            var graphDir = Path.Combine(outDir, "graph");
-            Directory.CreateDirectory(graphDir);
-
-            var nodesCsv = Path.Combine(graphDir, "nodes.csv");
-            var edgesCsv = Path.Combine(graphDir, "edges.csv");
-            var graphJson = Path.Combine(graphDir, "graph.json");
-
-            File.WriteAllLines(
-                nodesCsv,
-                (new[] { "key,kind,name,schema,file,batch,domain,body_path" })
-                    .Concat(nodes.OrderBy(n => n.Key)
-                        .Select(n => Csv(n.Key, n.Kind, n.Name, n.Schema, ToRel(n.File), n.Batch, n.Domain, n.BodyPath))));
-
-            File.WriteAllLines(
-                edgesCsv,
-                (new[] { "from,to,relation,to_kind,file,batch" })
-                    .Concat(edges.OrderBy(e => e.From).ThenBy(e => e.To)
-                        .Select(e => Csv(e.From, e.To, e.Relation, e.ToKind, ToRel(e.File), e.Batch))));
-
-            var graph = new
+            public int? Batch;
+            public string BodyPath;
+            public string Domain;
+            public string File;
+            public string Key;
+            public string Kind;
+            public string Name;
+            public string Schema;
+            public NodeRow(string key, string kind, string name, string schema, string file, int? batch, string domain, string bodyPath)
             {
-                nodes = nodes.OrderBy(n => n.Key).ToArray(),
-                edges = edges.OrderBy(e => e.From).ThenBy(e => e.To).ToArray()
-            };
-
-            File.WriteAllText(graphJson, JsonConvert.SerializeObject(graph, Formatting.Indented));
-            ConsoleLog.Info("Written graph artifacts: " + nodesCsv + " | " + edgesCsv + " | " + graphJson);
-        }
-
-        private static void WriteManifest(
-            string outDir,
-            string sqlRoot,
-            List<string> codeRoots,
-            int nodeCount,
-            int edgeCount,
-            int bodiesCount)
-        {
-            var manifestObj = new
-            {
-                schema = 1,
-                builtAt = DateTimeOffset.Now.ToString("o"),
-                sqlRoot,
-                codeRoots,
-                counts = new { nodes = nodeCount, edges = edgeCount, docs = bodiesCount }
-            };
-
-            var manifestPath = Path.Combine(outDir, "manifest.json");
-            File.WriteAllText(manifestPath, JsonConvert.SerializeObject(manifestObj, Formatting.Indented));
-            ConsoleLog.Info("Manifest written: " + manifestPath);
-        }
-
-        private static string Csv(params object[] vals)
-            => string.Join(",", vals.Select(v =>
-                "\"" + ((v != null ? v.ToString() : string.Empty).Replace("\"", "\"\"")) + "\""));
-
-        private static string ToRel(string p) => p == null ? null : p.Replace('\\', '/');
-
-        // ===== Utilities =====
-        private static string GetRelativePathSafe(string baseDir, string fullPath)
-        {
-            try
-            {
-                var baseUri = new Uri(AppendDirSep(baseDir));
-                var pathUri = new Uri(fullPath);
-                var rel = Uri.UnescapeDataString(baseUri.MakeRelativeUri(pathUri).ToString());
-                return rel.Replace('/', Path.DirectorySeparatorChar);
-            }
-            catch
-            {
-                return fullPath;
+                Key = key;
+                Kind = kind;
+                Name = name;
+                Schema = schema;
+                File = file;
+                Batch = batch;
+                Domain = domain;
+                BodyPath = bodyPath;
             }
         }
-
-        private static string AppendDirSep(string dir)
+        // ====== Visitor (legacy) ======
+        private sealed class RefCollector : TSqlFragmentVisitor
         {
-            if (string.IsNullOrEmpty(dir)) return dir;
-            if (dir.EndsWith(Path.DirectorySeparatorChar.ToString())) return dir;
-            return dir + Path.DirectorySeparatorChar;
+            public readonly List<Tuple<SchemaObjectName, string, TSqlFragment>> Defines =
+                new List<Tuple<SchemaObjectName, string, TSqlFragment>>();
+
+            public readonly List<Tuple<SchemaObjectName, string, string>> References =
+                            new List<Tuple<SchemaObjectName, string, string>>();
+            public override void ExplicitVisit(CreateSynonymStatement node)
+            {
+                AddDefine(node.Name, "SYNONYM", node);
+                if (node.ForName != null)
+                    AddRef(node.ForName, null, "SynonymFor");
+            }
+
+            // Definitions
+            public override void Visit(CreateTableStatement node) =>
+                AddDefine(node.SchemaObjectName, "TABLE", node);
+
+            public override void Visit(CreateViewStatement node) =>
+                AddDefine(node.SchemaObjectName, "VIEW", node);
+
+            public override void Visit(CreateProcedureStatement node)
+            {
+                if (node.ProcedureReference != null)
+                    AddDefine(node.ProcedureReference.Name, "PROC", node);
+            }
+
+            public override void Visit(CreateFunctionStatement node) =>
+                AddDefine(node.Name, "FUNC", node);
+
+            public override void Visit(CreateTypeTableStatement node) =>
+                AddDefine(node.Name, "TYPE", node);
+
+            public override void Visit(CreateTypeUddtStatement node) =>
+                AddDefine(node.Name, "TYPE", node);
+
+            public override void Visit(CreateSequenceStatement node) =>
+                AddDefine(node.Name, "SEQUENCE", node);
+
+            public override void Visit(CreateTriggerStatement node)
+            {
+                AddDefine(node.Name, "TRIGGER", node);
+                var trgObj = node.TriggerObject;
+                if (trgObj != null && trgObj.Name != null)
+                    AddRef(trgObj.Name, null, "On");
+            }
+
+            // ALTER statements
+            public override void Visit(AlterTableAddTableElementStatement node) =>
+                AddDefine(node.SchemaObjectName, "TABLE", node);
+
+            public override void Visit(AlterViewStatement node)
+            {
+                if (node.SchemaObjectName != null)
+                    AddDefine(node.SchemaObjectName, "VIEW", node);
+            }
+
+            public override void Visit(AlterProcedureStatement node)
+            {
+                if (node.ProcedureReference != null && node.ProcedureReference.Name != null)
+                    AddDefine(node.ProcedureReference.Name, "PROC", node);
+            }
+
+            public override void Visit(AlterFunctionStatement node)
+            {
+                if (node.Name != null)
+                    AddDefine(node.Name, "FUNC", node);
+            }
+
+            // References
+            public override void Visit(NamedTableReference node)
+            {
+                if (node.SchemaObject != null)
+                    AddRef(node.SchemaObject, "TABLE_OR_VIEW", "ReadsFrom");
+            }
+
+            public override void Visit(InsertStatement node)
+            {
+                if (node.InsertSpecification != null &&
+                    node.InsertSpecification.Target is NamedTableReference t)
+                    AddRef(t.SchemaObject, "TABLE", "WritesTo");
+            }
+
+            public override void Visit(UpdateStatement node)
+            {
+                if (node.UpdateSpecification != null &&
+                    node.UpdateSpecification.Target is NamedTableReference t)
+                    AddRef(t.SchemaObject, "TABLE", "WritesTo");
+            }
+
+            public override void Visit(DeleteStatement node)
+            {
+                if (node.DeleteSpecification != null &&
+                    node.DeleteSpecification.Target is NamedTableReference t)
+                    AddRef(t.SchemaObject, "TABLE", "WritesTo");
+            }
+
+            public override void Visit(MergeStatement node)
+            {
+                var ms = node.MergeSpecification;
+                if (ms == null) return;
+
+                var t = ms.Target as NamedTableReference;
+                if (t != null)
+                    AddRef(t.SchemaObject, "TABLE", "WritesTo");
+
+                var s = ms.TableReference as NamedTableReference;
+                if (s != null)
+                    AddRef(s.SchemaObject, "TABLE_OR_VIEW", "ReadsFrom");
+            }
+
+            public override void Visit(ExecuteSpecification node)
+            {
+                var pr = node.ExecutableEntity as ExecutableProcedureReference;
+                if (pr != null &&
+                    pr.ProcedureReference != null &&
+                    pr.ProcedureReference.ProcedureReference != null &&
+                    pr.ProcedureReference.ProcedureReference.Name != null)
+                {
+                    var nm = pr.ProcedureReference.ProcedureReference.Name;
+                    AddRef(nm, "PROC", "Executes");
+                }
+            }
+
+            private void AddDefine(SchemaObjectName name, string kind, TSqlFragment frag)
+            {
+                if (name == null || name.BaseIdentifier == null) return;
+                Defines.Add(Tuple.Create(name, kind, frag));
+            }
+
+            private void AddRef(SchemaObjectName name, string kindHint, string relation)
+            {
+                if (name == null || name.BaseIdentifier == null) return;
+                if (IsTempOrVar(name)) return;
+                References.Add(Tuple.Create(name, kindHint, relation));
+            }
+
+            private bool IsTempOrVar(SchemaObjectName n)
+            {
+                var bi = n.BaseIdentifier != null ? n.BaseIdentifier.Value : null;
+                if (bi == null) return false;
+                return bi.StartsWith("#") || bi.StartsWith("@");
+            }
         }
     }
 }
