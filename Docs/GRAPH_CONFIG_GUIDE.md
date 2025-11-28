@@ -167,4 +167,6 @@ This setup gives you:
 * SQL graph from `sqlRoot` (tables, views, procs, etc.),
 * model / DbSet graph from `modelRoot` (DBSET / ENTITY nodes),
 * inline SQL edges from `inlineSqlRoot` (METHOD/inline SQL → TABLE/VIEW),
-* migration-based edges from `migrationsRoot` (see the separate migration design doc).
+* migration-based edges from `migrationsRoot` (MIGRATION → TABLE, SchemaChange/DataChange),
+* MIGRATION bodies + structured summary in sql_bodies.jsonl from `migrationsRoot`
+  (createsTables, dropsTables, addsColumns, dropsColumns, addsForeignKeys, dropsForeignKeys).
