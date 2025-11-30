@@ -146,6 +146,122 @@ namespace RoslynIndexer.Net9.Tests.EndToEnd
             }
         }
 
+        [TestMethod]
+        public void SqlWithForeignKey_ProducesForeignKeyEdgeInGraph()
+        {
+            // Root for this test run
+            var testRoot = Path.Combine(
+                Path.GetTempPath(),
+                "RoslynIndexer_E2E_ForeignKey_" + Guid.NewGuid().ToString("N"));
+
+            Directory.CreateDirectory(testRoot);
+
+            try
+            {
+                // 1) Prepare folder structure
+                var solutionDir = Path.Combine(testRoot, "MiniFkSolution");
+                var projectDir = Path.Combine(solutionDir, "MiniFkProject");
+                var sqlDir = Path.Combine(solutionDir, "sql");
+                var tempRoot = Path.Combine(testRoot, "temp");
+                var outDir = Path.Combine(testRoot, "out");
+
+                Directory.CreateDirectory(solutionDir);
+                Directory.CreateDirectory(projectDir);
+                Directory.CreateDirectory(sqlDir);
+                Directory.CreateDirectory(tempRoot);
+                Directory.CreateDirectory(outDir);
+
+                var solutionPath = Path.Combine(solutionDir, "MiniFkSolution.sln");
+                var projectPath = Path.Combine(projectDir, "MiniFkProject.csproj");
+                var configPath = Path.Combine(testRoot, "config_fk.json");
+
+                // 2) Minimal solution + project.
+                //    C# side is not used by SQL stage directly, but Program.Net9
+                //    still expects a solution to exist and be loadable.
+                CreateMinimalSln(solutionPath, projectPath);
+                CreateMinimalProjectFile(projectPath);
+                CreateMiniEfModel(projectDir);
+
+                // 3) SQL scripts: dbo.Parent + dbo.Child with FOREIGN KEY to Parent
+                CreateSqlScriptsWithForeignKey(sqlDir);
+
+                // 4) Config: SQL-only for now.
+                //    This test is structured so that we can extend it later
+                //    with EF / migrations / inline SQL expectations.
+                CreateConfigJson(
+                    configPath,
+                    solutionPath,
+                    tempRoot,
+                    outDir,
+                    sqlDir: sqlDir,
+                    efDir: string.Empty,
+                    migrationsDir: string.Empty,
+                    includeEntityBaseTypes: false);
+
+                // 5) Run RoslynIndexer.Net9 with this config
+                RunRoslynIndexerNet9WithConfig(configPath).GetAwaiter().GetResult();
+
+                // 6) Program.Net9 packs tempRoot into ZIP in outDir
+                var zipFiles = Directory.EnumerateFiles(outDir, "*.zip").ToList();
+                Assert.IsTrue(zipFiles.Count >= 1,
+                    "Expected at least one ZIP archive in the 'out' folder for ForeignKey run.");
+
+                var firstZip = zipFiles[0];
+
+                // 7) Unpack ZIP to inspect sql_code_bundle graph artifacts
+                var unpackRoot = Path.Combine(testRoot, "unzipped");
+                Directory.CreateDirectory(unpackRoot);
+                ZipFile.ExtractToDirectory(firstZip, unpackRoot);
+
+                var sqlBundleRoot = Path.Combine(unpackRoot, "sql_code_bundle");
+                var docsDir = Path.Combine(sqlBundleRoot, "docs");
+                var graphDir = Path.Combine(sqlBundleRoot, "graph");
+
+                var sqlBodiesPath = Path.Combine(docsDir, "sql_bodies.jsonl");
+                var nodesCsvPath = Path.Combine(graphDir, "nodes.csv");
+                var edgesCsvPath = Path.Combine(graphDir, "edges.csv");
+
+                Assert.IsTrue(File.Exists(sqlBodiesPath),
+                    "Expected sql_bodies.jsonl to be produced in ForeignKey scenario.");
+                Assert.IsTrue(File.Exists(nodesCsvPath),
+                    "Expected nodes.csv to be produced in ForeignKey scenario.");
+                Assert.IsTrue(File.Exists(edgesCsvPath),
+                    "Expected edges.csv to be produced in ForeignKey scenario.");
+
+                var nodesLines = File.ReadAllLines(nodesCsvPath);
+                var edgesLines = File.ReadAllLines(edgesCsvPath);
+
+                // 8) TABLE nodes for dbo.Parent and dbo.Child
+                Assert.IsTrue(
+                    nodesLines.Any(l => l.Contains("dbo.Parent|TABLE")),
+                    "Expected TABLE node for dbo.Parent (dbo.Parent|TABLE) in ForeignKey graph.");
+
+                Assert.IsTrue(
+                    nodesLines.Any(l => l.Contains("dbo.Child|TABLE")),
+                    "Expected TABLE node for dbo.Child (dbo.Child|TABLE) in ForeignKey graph.");
+
+                // 9) Child -> Parent ForeignKey edge
+                // NOTE: BuildSqlKnowledge currently attaches all batch references
+                //       to each defined object in the batch; we assert only that
+                //       there exists an edge that contains:
+                //       - dbo.Child|TABLE
+                //       - dbo.Parent|TABLE
+                //       - relation = ForeignKey
+                Assert.IsTrue(
+                    edgesLines.Any(l =>
+                        l.Contains("dbo.Child|TABLE") &&
+                        l.Contains("dbo.Parent|TABLE") &&
+                        l.Contains("ForeignKey")),
+                    "Expected ForeignKey edge: dbo.Child|TABLE -> dbo.Parent|TABLE in SQL graph.");
+            }
+            finally
+            {
+                CleanupTestRoot(testRoot);
+            }
+        }
+
+
+
 
         [TestMethod]
         public void MigrationsOnly_ProducesMigrationAndTableNodesInGraph()
@@ -773,6 +889,37 @@ CREATE TABLE dbo.Customer
             var filePath = Path.Combine(sqlDir, "001_CreateCustomer.sql");
             File.WriteAllText(filePath, sql, Encoding.UTF8);
         }
+
+        /// <summary>
+        /// Creates SQL scripts declaring dbo.Parent and dbo.Child tables.
+        /// dbo.Child has a FOREIGN KEY referencing dbo.Parent.
+        /// This is used to validate ForeignKey edges in the SQL graph.
+        /// </summary>
+        private static void CreateSqlScriptsWithForeignKey(string sqlDir)
+        {
+            var sql = """
+CREATE TABLE dbo.Parent
+(
+    Id   INT           NOT NULL PRIMARY KEY,
+    Name NVARCHAR(100) NOT NULL
+);
+
+CREATE TABLE dbo.Child
+(
+    Id        INT NOT NULL PRIMARY KEY,
+    ParentId  INT NOT NULL,
+    CONSTRAINT FK_Child_Parent
+        FOREIGN KEY (ParentId)
+        REFERENCES dbo.Parent(Id)
+);
+""";
+
+            var filePath = Path.Combine(sqlDir, "001_CreateParentChildWithFk.sql");
+            File.WriteAllText(filePath, sql, Encoding.UTF8);
+        }
+
+
+
 
         /// <summary>
         /// Creates a minimal "migration" class recognized by EfMigrationAnalyzer:

@@ -2374,13 +2374,16 @@ namespace RoslynIndexer.Core.Sql
             }
         }
         // ====== Visitor (legacy) ======
+
+        // ====== Visitor (legacy) ======
         private sealed class RefCollector : TSqlFragmentVisitor
         {
             public readonly List<Tuple<SchemaObjectName, string, TSqlFragment>> Defines =
                 new List<Tuple<SchemaObjectName, string, TSqlFragment>>();
 
             public readonly List<Tuple<SchemaObjectName, string, string>> References =
-                            new List<Tuple<SchemaObjectName, string, string>>();
+                new List<Tuple<SchemaObjectName, string, string>>();
+
             public override void ExplicitVisit(CreateSynonymStatement node)
             {
                 AddDefine(node.Name, "SYNONYM", node);
@@ -2389,8 +2392,18 @@ namespace RoslynIndexer.Core.Sql
             }
 
             // Definitions
-            public override void Visit(CreateTableStatement node) =>
+            public override void Visit(CreateTableStatement node)
+            {
+                // Definition of TABLE itself
                 AddDefine(node.SchemaObjectName, "TABLE", node);
+
+                // Foreign key constraints declared inside CREATE TABLE
+                // will be translated into edges: ChildTable --(ForeignKey)--> ParentTable.
+                if (node.Definition != null)
+                {
+                    CollectForeignKeyReferences(node.Definition);
+                }
+            }
 
             public override void Visit(CreateViewStatement node) =>
                 AddDefine(node.SchemaObjectName, "VIEW", node);
@@ -2422,25 +2435,17 @@ namespace RoslynIndexer.Core.Sql
             }
 
             // ALTER statements
-            public override void Visit(AlterTableAddTableElementStatement node) =>
+            public override void Visit(AlterTableAddTableElementStatement node)
+            {
+                // ALTER TABLE always "touches" a TABLE definition
                 AddDefine(node.SchemaObjectName, "TABLE", node);
 
-            public override void Visit(AlterViewStatement node)
-            {
-                if (node.SchemaObjectName != null)
-                    AddDefine(node.SchemaObjectName, "VIEW", node);
-            }
-
-            public override void Visit(AlterProcedureStatement node)
-            {
-                if (node.ProcedureReference != null && node.ProcedureReference.Name != null)
-                    AddDefine(node.ProcedureReference.Name, "PROC", node);
-            }
-
-            public override void Visit(AlterFunctionStatement node)
-            {
-                if (node.Name != null)
-                    AddDefine(node.Name, "FUNC", node);
+                // If this ALTER adds foreign key constraints, capture them
+                // as ChildTable --(ForeignKey)--> ParentTable relations.
+                if (node.Definition != null)
+                {
+                    CollectForeignKeyReferences(node.Definition);
+                }
             }
 
             // References
@@ -2498,6 +2503,30 @@ namespace RoslynIndexer.Core.Sql
                 }
             }
 
+            /// <summary>
+            /// Collects foreign key references from table-level constraints and
+            /// emits them as TABLE --(ForeignKey)--> TABLE references.
+            /// Only table-level FK constraints are handled here; column-level FK
+            /// syntax may be added later if needed.
+            /// </summary>
+            private void CollectForeignKeyReferences(TableDefinition definition)
+            {
+                if (definition == null || definition.TableConstraints == null || definition.TableConstraints.Count == 0)
+                    return;
+
+                foreach (var constraint in definition.TableConstraints.OfType<ForeignKeyConstraintDefinition>())
+                {
+                    var refTable = constraint.ReferenceTableName;
+                    if (refTable != null)
+                    {
+                        // 'refTable' is the parent (referenced) TABLE.
+                        // The current TABLE (child) is the batch's defining object;
+                        // BuildSqlKnowledge will connect: childKey -> parentKey with relation "ForeignKey".
+                        AddRef(refTable, "TABLE", "ForeignKey");
+                    }
+                }
+            }
+
             private void AddDefine(SchemaObjectName name, string kind, TSqlFragment frag)
             {
                 if (name == null || name.BaseIdentifier == null) return;
@@ -2518,5 +2547,7 @@ namespace RoslynIndexer.Core.Sql
                 return bi.StartsWith("#") || bi.StartsWith("@");
             }
         }
+
+
     }
 }
