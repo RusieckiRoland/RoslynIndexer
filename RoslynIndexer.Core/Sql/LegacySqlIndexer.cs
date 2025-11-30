@@ -667,24 +667,83 @@ namespace RoslynIndexer.Core.Sql
                                 continue;
 
                             // For now we default to dbo – SQL side may refine this later.
-                            var toKey = "dbo." + tableName + "|TABLE";
+                            var tableKey = "dbo." + tableName + "|TABLE";
 
+                            // MIGRATION -> TABLE edge (schema evolution information).
                             edges.Add(new EdgeRow(
                                 from: migrationKey,
-                                to: toKey,
+                                to: tableKey,
                                 relation: relation,
                                 toKind: "TABLE",
                                 file: mig.FileRelativePath ?? string.Empty,
                                 batch: null));
 
+                            // TABLE -> TABLE ForeignKey edge for AddForeignKey operations.
+                            // We intentionally do not emit TABLE->TABLE for DropForeignKey – the static graph
+                            // is meant to represent current logical relationships; drops are handled by consumers.
+                            if (string.Equals(op.Operation, "AddForeignKey", StringComparison.Ordinal))
+                            {
+                                var principalTable = TryGetPrincipalTableFromRaw(op);
+                                if (!string.IsNullOrWhiteSpace(principalTable))
+                                {
+                                    var principalKey = "dbo." + principalTable + "|TABLE";
+
+                                    edges.Add(new EdgeRow(
+                                        from: tableKey,          // dependent table, e.g. dbo.Orders|TABLE
+                                        to: principalKey,        // principal table, e.g. dbo.Customers|TABLE
+                                        relation: "ForeignKey",
+                                        toKind: "TABLE",
+                                        file: mig.FileRelativePath ?? string.Empty,
+                                        batch: null));
+                                }
+                            }
+
                             addedEdges++;
                         }
+
+
                     }
                 }
                 catch (Exception ex)
                 {
                     ConsoleLog.Warn("EF-Migrations (v2): failed to analyze root '" + root + "': " + ex.Message);
                 }
+
+                // Local helper: best-effort principalTable extraction from EF migration DSL.
+                // Example we expect in op.Raw:
+                //   MigrationBuilder.AddForeignKey(
+                //       name: "FK_Orders_Customers_CustomerId",
+                //       table: "Orders",
+                //       column: "CustomerId",
+                //       principalTable: "Customers",
+                //       principalColumn: "Id", ...);
+                static string TryGetPrincipalTableFromRaw(EfMigrationOperation op)
+                {
+                    if (op == null)
+                        return null;
+
+                    var raw = op.Raw;
+                    if (string.IsNullOrEmpty(raw))
+                        return null;
+
+                    const string marker = "principalTable";
+                    var idx = raw.IndexOf(marker, StringComparison.Ordinal);
+                    if (idx < 0)
+                        return null;
+
+                    // Find first quote after "principalTable"
+                    var quoteStart = raw.IndexOf('"', idx);
+                    if (quoteStart < 0 || quoteStart + 1 >= raw.Length)
+                        return null;
+
+                    var quoteEnd = raw.IndexOf('"', quoteStart + 1);
+                    if (quoteEnd < 0 || quoteEnd <= quoteStart + 1)
+                        return null;
+
+                    return raw.Substring(quoteStart + 1, quoteEnd - quoteStart - 1);
+                }
+
+
             }
 
             // 3) Fallback path (MiniEf) – bez zmian, tylko korzysta z tych samych zmiennych

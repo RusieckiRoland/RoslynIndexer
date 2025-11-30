@@ -1,58 +1,105 @@
 ## Pliki Visual Studio ##
 .vs/
 **/*.vsidx
+**/*.psess
+**/*.vspx
 
 ## Wyniki kompilacji ##
 bin/
 obj/
+artifacts/
 *.exe
 *.dll
 *.pdb
 *.cache
+*.ilk
+*.exp
+*.lib
+*.iobj
+*.ipdb
+*.metagen
 
 ## Pliki użytkownika i konfiguracja środowiska ##
 *.user
 *.suo
-*.[Cc]ache
+*.userprefs
 *.userosscache
 *.sln.docstates
+*.sln.cache
 
 ## Pliki tymczasowe IDE ##
 **/x/s/
 **/v17/
+**/v18/
 **/TestStore/
 **/*.testlog
 **/testlog.manifest
 **/.futdcache.v2
 **/DocumentLayout*.json
+**/Generated Files/
+**/StyleCopReport.xml
 
 ## VS Code ##
 .vscode/
+*.code-workspace
 
 ## NuGet ##
 [Nn]u[Gg]et/
 *.nupkg
 packages/
 packages-*/
+.nuget/
 
-## ReSharper ##
+## ReSharper / Rider ##
 _ReSharper*/
 *.[Rr]e[Ss]harper
-
-## Rider ##
+*.DotSettings.user
 .idea/
+*.iml
 
 ## Azure Functions ##
 azure-functions-cli/
+local.settings.json
+*.azurefuncs
 
 ## Pliki systemowe ##
 .DS_Store
 Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
 
 ## Wyniki testów ##
 TestResults/
 *.trx
 *.coverage
+*.coveragexml
+*.opencover.xml
 
-## Publikacja ##
+## Publikacja i artefakty ##
 publish/
+dist/
+out/
+wwwroot/
+*.zip
+!*.config.zip
+
+## ——— TWOJE SPECJALNE WYŁĄCZENIA (ważne!) ——— ##
+# Cały folder .temp – używany przez RoslynIndexer do tymczasowych artefaktów
+.temp/
+**/temp/
+
+# Wszystkie pliki i foldery zaczynające się na csproj_dump_RoslynIndexer
+csproj_dump_RoslynIndexer*
+**/csproj_dump_RoslynIndexer*
+
+# Skrypt generujący dump (nie chcemy go wersjonować)
+newDump.ps1
+
+## Inne popularne śmieci ##
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+~$*

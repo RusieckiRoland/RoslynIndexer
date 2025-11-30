@@ -380,6 +380,190 @@ namespace RoslynIndexer.Net9.Tests.EndToEnd
             }
         }
 
+        [TestMethod]
+        public void Migrations_AddForeignKey_ProducesTableToTableForeignKeyEdge()
+        {
+            var testRoot = Path.Combine(
+                Path.GetTempPath(),
+                "RoslynIndexer_E2E_Migrations_FK_" + Guid.NewGuid().ToString("N"));
+
+            Directory.CreateDirectory(testRoot);
+
+            try
+            {
+                // 1) Prepare folder structure
+                var solutionDir = Path.Combine(testRoot, "MiniEfFkSolution");
+                var projectDir = Path.Combine(solutionDir, "MiniEfFkProject");
+                var migrationsDir = Path.Combine(solutionDir, "migrations");
+                var tempRoot = Path.Combine(testRoot, "temp");
+                var outDir = Path.Combine(testRoot, "out");
+
+                Directory.CreateDirectory(solutionDir);
+                Directory.CreateDirectory(projectDir);
+                Directory.CreateDirectory(migrationsDir);
+                Directory.CreateDirectory(tempRoot);
+                Directory.CreateDirectory(outDir);
+
+                var solutionPath = Path.Combine(solutionDir, "MiniEfFkSolution.sln");
+                var projectPath = Path.Combine(projectDir, "MiniEfFkProject.csproj");
+                var configPath = Path.Combine(testRoot, "config_fk_migrations.json");
+
+                // 2) Minimal solution + project + EF model
+                CreateMinimalSln(solutionPath, projectPath);
+                CreateMinimalProjectFile(projectPath);
+                CreateMiniEfModel(projectDir);
+
+                // 3) Migrations with AddForeignKey pattern
+                CreateMigrationsWithForeignKey(migrationsDir);
+
+                // 4) Config: migrations-only scenario (no SQL, no dbGraph.entityBaseTypes)
+                CreateConfigJson(
+                    configPath,
+                    solutionPath,
+                    tempRoot,
+                    outDir,
+                    sqlDir: string.Empty,
+                    efDir: string.Empty,
+                    migrationsDir: migrationsDir,
+                    includeEntityBaseTypes: false);
+
+                // 5) Run RoslynIndexer.Net9 with this config
+                RunRoslynIndexerNet9WithConfig(configPath).GetAwaiter().GetResult();
+
+                // 6) Unpack ZIP and inspect nodes/edges.
+                var zipFiles = Directory.EnumerateFiles(outDir, "*.zip").ToList();
+                Assert.IsTrue(zipFiles.Count >= 1,
+                    "Expected at least one ZIP archive in the 'out' folder for migrations-with-FK run.");
+
+                var firstZip = zipFiles[0];
+
+                var unpackRoot = Path.Combine(testRoot, "unzipped");
+                Directory.CreateDirectory(unpackRoot);
+                ZipFile.ExtractToDirectory(firstZip, unpackRoot);
+
+                var sqlBundleRoot = Path.Combine(unpackRoot, "sql_code_bundle");
+                var docsDir = Path.Combine(sqlBundleRoot, "docs");
+                var graphDir = Path.Combine(sqlBundleRoot, "graph");
+
+                var sqlBodiesPath = Path.Combine(docsDir, "sql_bodies.jsonl");
+                var nodesCsvPath = Path.Combine(graphDir, "nodes.csv");
+                var edgesCsvPath = Path.Combine(graphDir, "edges.csv");
+
+                Assert.IsTrue(File.Exists(sqlBodiesPath),
+                    "Expected sql_bodies.jsonl to be produced (inside ZIP) for migrations-with-FK run.");
+                Assert.IsTrue(File.Exists(nodesCsvPath),
+                    "Expected nodes.csv to be produced (inside ZIP) for migrations-with-FK run.");
+                Assert.IsTrue(File.Exists(edgesCsvPath),
+                    "Expected edges.csv to be produced (inside ZIP) for migrations-with-FK run.");
+
+                var nodesLines = File.ReadAllLines(nodesCsvPath);
+                var edgesLines = File.ReadAllLines(edgesCsvPath);
+
+                // MIGRATION node must exist for our migration.
+                Assert.IsTrue(
+                    nodesLines.Any(l =>
+                        l.Contains("csharp:MiniEf.Migrations.AddOrdersCustomerForeignKeyMigration|MIGRATION")),
+                    "Expected MIGRATION node for AddOrdersCustomerForeignKeyMigration in migrations-with-FK graph.");
+
+                // TABLE -> TABLE ForeignKey edge:
+                //   dbo.Orders|TABLE -> dbo.Customer|TABLE
+                //
+                // This test is intentionally small but can be extended with more assertions
+                // (composite keys, different delete behaviors, etc.) as FK support grows.
+                Assert.IsTrue(
+                    edgesLines.Any(l =>
+                        l.Contains("dbo.Orders|TABLE") &&
+                        l.Contains("dbo.Customer|TABLE") &&
+                        l.Contains("ForeignKey")),
+                    "Expected ForeignKey edge: dbo.Orders|TABLE -> dbo.Customer|TABLE in migrations-with-FK graph.");
+            }
+            finally
+            {
+                CleanupTestRoot(testRoot);
+            }
+        }
+
+        /// <summary>
+        /// Creates a minimal migration that uses MigrationBuilder.AddForeignKey
+        /// so that EF-migration stage can produce TABLE -> TABLE ForeignKey edges.
+        /// </summary>
+        private static void CreateMigrationsWithForeignKey(string migrationsDir)
+        {
+            var code = """
+using MiniEf;
+
+namespace MiniEf.Migrations
+{
+    [NopUpdateMigration]
+    public class AddOrdersCustomerForeignKeyMigration
+    {
+        public void Up()
+        {
+            // Table touch so EfMigrationAnalyzer can still see a table operation.
+            Schema.Table(nameof(Customer));
+
+            // AddForeignKey pattern that should result in TABLE -> TABLE ForeignKey edge:
+            //   dbo.Orders|TABLE -> dbo.Customer|TABLE
+            MigrationBuilder.AddForeignKey(
+                name: "FK_Orders_Customers_CustomerId",
+                table: "Orders",
+                column: "CustomerId",
+                principalTable: "Customer",
+                principalColumn: "Id",
+                onDelete: ReferentialAction.Cascade);
+        }
+
+        public void Down()
+        {
+            // No-op for this test.
+        }
+    }
+
+    // Minimal DSL stub so that Schema.Table(...) compiles.
+    public static class Schema
+    {
+        public static SchemaTableExpression Table(string name) => new SchemaTableExpression();
+
+        public sealed class SchemaTableExpression
+        {
+        }
+    }
+
+    // Minimal MigrationBuilder stub – only what the analyzer and test need.
+    public static class MigrationBuilder
+    {
+        public static void AddForeignKey(
+            string name,
+            string table,
+            string column,
+            string principalTable,
+            string principalColumn,
+            ReferentialAction onDelete)
+        {
+        }
+    }
+
+    public enum ReferentialAction
+    {
+        Cascade,
+        Restrict,
+        NoAction,
+        SetNull,
+        SetDefault
+    }
+
+    // Marker attribute – the name contains "UpdateMigration", so IsMigrationClass()
+    // will treat AddOrdersCustomerForeignKeyMigration as a migration class.
+    [System.AttributeUsage(System.AttributeTargets.Class)]
+    public sealed class NopUpdateMigrationAttribute : System.Attribute
+    {
+    }
+}
+""";
+
+            var filePath = Path.Combine(migrationsDir, "AddOrdersCustomerForeignKeyMigration.cs");
+            File.WriteAllText(filePath, code, Encoding.UTF8);
+        }
 
 
 
@@ -642,8 +826,9 @@ WHERE c.IsActive = 1;
         }
 
 
+        // File: RoslynIndexer.Tests/EndToEnd/SqlEfGraphEndToEndTests.cs
+
         [TestMethod]
-       
         public void MiniSolution_ProducesExpectedSqlEfGraphArtifacts()
         {
             // Root for this test run
@@ -672,9 +857,9 @@ WHERE c.IsActive = 1;
 
                 var solutionPath = Path.Combine(solutionDir, "MiniEfSolution.sln");
                 var projectPath = Path.Combine(projectDir, "MiniEfProject.csproj");
-                var configPath = Path.Combine(testRoot, "config.json");
+                var configPath = Path.Combine(testRoot, "config_mini.json");
 
-                // 2) Create minimal solution + project + C# files + SQL + migrations + config
+                // 2) Minimal solution + project + model + migrations
                 CreateMinimalSln(solutionPath, projectPath);
                 CreateMinimalProjectFile(projectPath);
                 CreateMiniEfModel(projectDir);
@@ -689,24 +874,24 @@ WHERE c.IsActive = 1;
                     projectDir,
                     migrationsDir);
 
-                // 3) Run RoslynIndexer.Net9 (osobny proces z --config)
+                // 3) Run RoslynIndexer.Net9 (separate process with --config)
                 RunRoslynIndexerNet9WithConfig(configPath).GetAwaiter().GetResult();
 
-                // 4) ZIP w outDir – Program.Net9 usuwa tempRoot po spakowaniu,
-                // więc artefakty sprawdzamy wewnątrz archiwum.
+                // 4) ZIP in outDir – Program.Net9 removes tempRoot after packing,
+                // so we inspect artifacts inside the archive.
                 var zipFiles = Directory.EnumerateFiles(outDir, "*.zip").ToList();
                 Assert.IsTrue(zipFiles.Count >= 1,
                     "Expected at least one ZIP archive in the 'out' folder.");
 
                 var firstZip = zipFiles[0];
 
-                // 5) Rozpakuj ZIP do osobnego katalogu
+                // 5) Unpack ZIP to a temporary folder
                 var unpackRoot = Path.Combine(testRoot, "unzipped");
                 Directory.CreateDirectory(unpackRoot);
                 ZipFile.ExtractToDirectory(firstZip, unpackRoot);
 
-                // Po rozpakowaniu rootem powinny być:
-                // sql_code_bundle/, regular_code_bundle/, manifest.json, itd.
+                // After unpacking we expect:
+                // sql_code_bundle/, regular_code_bundle/, manifest.json, etc.
                 var sqlBundleRoot = Path.Combine(unpackRoot, "sql_code_bundle");
                 var docsDir = Path.Combine(sqlBundleRoot, "docs");
                 var graphDir = Path.Combine(sqlBundleRoot, "graph");
@@ -737,8 +922,8 @@ WHERE c.IsActive = 1;
 
                 // MIGRATION node
                 Assert.IsTrue(
-               nodesLines.Any(l => l.Contains("csharp:MiniEf.Migrations.AddCustomerTouchMigration|MIGRATION")),
-               "Expected MIGRATION node for AddCustomerTouchMigration.");
+                    nodesLines.Any(l => l.Contains("csharp:MiniEf.Migrations.AddCustomerTouchMigration|MIGRATION")),
+                    "Expected MIGRATION node for AddCustomerTouchMigration.");
 
                 // ENTITY --> TABLE (MapsTo)
                 Assert.IsTrue(
@@ -748,13 +933,24 @@ WHERE c.IsActive = 1;
                         l.Contains("MapsTo")),
                     "Expected MapsTo edge: csharp:Customer|ENTITY -> dbo.Customer|TABLE.");
 
-                // MIGRATION --> TABLE (SchemaChange)
+                // MIGRATION --> TABLE (SchemaChange) – touch-table operation
                 Assert.IsTrue(
-                 edgesLines.Any(l =>
-                     l.Contains("csharp:MiniEf.Migrations.AddCustomerTouchMigration|MIGRATION") &&
-                     l.Contains("dbo.Customer|TABLE") &&
-                     l.Contains("SchemaChange")),
-                 "Expected SchemaChange edge: MIGRATION -> dbo.Customer|TABLE.");
+                    edgesLines.Any(l =>
+                        l.Contains("csharp:MiniEf.Migrations.AddCustomerTouchMigration|MIGRATION") &&
+                        l.Contains("dbo.Customer|TABLE") &&
+                        l.Contains("SchemaChange")),
+                    "Expected SchemaChange edge: MIGRATION -> dbo.Customer|TABLE.");
+                // TABLE --> TABLE (ForeignKey)
+                // dbo.Customer is dependent (because AddCustomerTouchMigration touches 'Customer')
+                // principal table extracted from AddForeignKey(...) in the migration is "Dependency" (from CreateMigrations)
+                Assert.IsTrue(
+                    edgesLines.Any(l =>
+                        l.Contains("dbo.Customer|TABLE") &&
+                        l.Contains("dbo.Dependency|TABLE") &&
+                        l.Contains("ForeignKey")),
+                    "Expected ForeignKey edge: dbo.Customer|TABLE -> dbo.Dependency|TABLE in TABLE->TABLE graph.");
+
+
 
             }
             finally
@@ -762,6 +958,9 @@ WHERE c.IsActive = 1;
                 CleanupTestRoot(testRoot);
             }
         }
+
+
+
 
         /// <summary>
         /// Creates a minimal Visual Studio solution file (.sln) with a single C# project.
@@ -927,6 +1126,15 @@ CREATE TABLE dbo.Child
         /// - method Up() calls Schema.Table(nameof(Customer)) which will be parsed
         ///   as EfMigrationOperationKind.TouchTable for table "Customer".
         /// </summary>
+
+        // File: RoslynIndexer.Tests/EndToEnd/SqlEfGraphEndToEndTests.cs
+
+        /// <summary>
+        /// Creates minimal "MiniEf.Migrations" classes for end-to-end tests:
+        /// - AddCustomerTouchMigration with:
+        ///   * Schema.Table(nameof(Customer))      -> TouchTable("Customer")
+        ///   * MigrationBuilder.AddForeignKey(...) -> AddForeignKey("Customer")
+        /// </summary>
         private static void CreateMigrations(string migrationsDir)
         {
             var code = """
@@ -941,6 +1149,14 @@ namespace MiniEf.Migrations
         {
             // This call is recognized by EfMigrationAnalyzer as TouchTable("Customer").
             Schema.Table(nameof(Customer));
+
+            // This call is recognized by EfMigrationAnalyzer as AddForeignKey on table "Customer".
+            MigrationBuilder.AddForeignKey(
+                name: "FK_Customer_Dependency",
+                table: "Customer",
+                schema: "dbo",
+                column: "DependencyId",
+                principalTable: "Dependency");
         }
 
         public void Down()
@@ -958,6 +1174,20 @@ namespace MiniEf.Migrations
         }
     }
 
+    // Minimal EF Core-style stub so that MigrationBuilder.AddForeignKey(...) compiles.
+    public static class MigrationBuilder
+    {
+        public static void AddForeignKey(
+            string name,
+            string table,
+            string schema,
+            string column,
+            string principalTable)
+        {
+            // no-op: this is only here so that the call site looks realistic
+        }
+    }
+
     // Marker attribute – the name contains "UpdateMigration", so IsMigrationClass() will treat
     // AddCustomerTouchMigration as a migration class.
     [System.AttributeUsage(System.AttributeTargets.Class)]
@@ -970,6 +1200,10 @@ namespace MiniEf.Migrations
             var filePath = Path.Combine(migrationsDir, "AddCustomerTouchMigration.cs");
             File.WriteAllText(filePath, code, Encoding.UTF8);
         }
+
+
+
+
         /// <summary>
         /// Creates config.json pointing to:
         /// - the generated solution,
