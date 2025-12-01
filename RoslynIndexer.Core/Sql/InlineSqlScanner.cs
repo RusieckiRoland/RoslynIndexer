@@ -624,38 +624,48 @@ namespace RoslynIndexer.Core.Sql
             if (string.IsNullOrWhiteSpace(value))
                 return false;
 
-            // Zamieniamy wszystkie białe znaki na pojedyncze spacje
+            // Normalize whitespace and casing once.
             var v = System.Text.RegularExpressions.Regex.Replace(value, @"\s+", " ").ToUpperInvariant();
 
             if (v.Length < 12)
                 return false;
 
+            // Classic DML-style heuristic (kept as-is for existing behaviour).
             bool hasVerb = v.Contains("SELECT") || v.Contains("INSERT") ||
                            v.Contains("UPDATE") || v.Contains("DELETE") ||
                            v.Contains("MERGE") || v.Contains("EXEC");
-
-            if (!hasVerb)
-                return false;
 
             bool hasStructure = v.Contains("FROM ") || v.Contains(" INTO ") ||
                                 v.Contains(" WHERE ") || v.Contains(" JOIN ") ||
                                 v.Contains(" TABLE ");
 
-            return hasStructure;
+            if (hasVerb && hasStructure)
+                return true;
+
+            // NEW: treat basic DDL with FK as SQL, even without SELECT/etc.
+            // This is primarily to support inline CREATE/ALTER TABLE with
+            // FOREIGN KEY / REFERENCES used for graph ForeignKey edges.
+            bool hasDdlTable = v.Contains("CREATE TABLE") || v.Contains("ALTER TABLE");
+            bool hasFk = v.Contains("FOREIGN KEY") && v.Contains(" REFERENCES ");
+
+            if (hasDdlTable && hasFk)
+                return true;
+
+            return false;
         }
 
         private static IEnumerable<SqlArtifact> AnalyzeSqlSnippet(
-            string filePath,
-            string relPath,
-            int lineNumber,
-            string sql)
+    string filePath,
+    string relPath,
+    int lineNumber,
+    string sql)
         {
             var artifacts = new List<SqlArtifact>();
 
             if (string.IsNullOrWhiteSpace(sql))
                 return artifacts;
 
-            // 1) Najpierw próbujemy pełnym parserem T-SQL (ScriptDom).
+            // 1) First, try full T-SQL parser (ScriptDom).
             try
             {
                 var parser = new TSql150Parser(initialQuotedIdentifiers: true);
@@ -670,13 +680,14 @@ namespace RoslynIndexer.Core.Sql
                         var collector = new MiniSqlRefCollector();
                         fragment.Accept(collector);
 
+                        // 1a) Normal DML-style refs (SELECT/INSERT/UPDATE/DELETE/etc.).
                         foreach (var r in collector.Refs)
                         {
                             var schema = string.IsNullOrEmpty(r.Schema) ? "dbo" : r.Schema;
                             var name = string.IsNullOrEmpty(r.Name) ? "(anon)" : r.Name;
                             var kind = string.IsNullOrEmpty(r.Kind) ? "TABLE_OR_VIEW" : r.Kind;
 
-                            // Kontrakt zgodny z TryParseInlineSqlIdentifier:
+                            // Contract compatible with TryParseInlineSqlIdentifier:
                             //   {schema}.{name}|{kind}|inline@{relPath}:L{line}
                             var id = string.Format(
                                 "{0}.{1}|{2}|inline@{3}:L{4}",
@@ -691,20 +702,46 @@ namespace RoslynIndexer.Core.Sql
                                 artifactKind: "InlineSQL",
                                 identifier: id));
                         }
+
+                        // 1b) NEW: if parser found no refs, try inline DDL with FK.
+                        if (collector.Refs.Count == 0)
+                        {
+                            var ddlCollector = new InlineDdlForeignKeyCollector();
+                            fragment.Accept(ddlCollector);
+
+                            foreach (var child in ddlCollector.Children)
+                            {
+                                var schema = string.IsNullOrWhiteSpace(child.Schema) ? "dbo" : child.Schema;
+                                var name = string.IsNullOrWhiteSpace(child.Name) ? "(anon)" : child.Name;
+
+                                // For DDL + FK we treat the child table as TABLE kind.
+                                var id = string.Format(
+                                    "{0}.{1}|TABLE|inline@{2}:L{3}",
+                                    schema,
+                                    name,
+                                    relPath,
+                                    lineNumber);
+
+                                artifacts.Add(new SqlArtifact(
+                                    sourcePath: filePath,
+                                    artifactKind: "InlineSQL",
+                                    identifier: id));
+                            }
+                        }
                     }
                 }
             }
             catch
             {
-                // Ignorujemy błąd parsera – przejdziemy do fallbacku regexowego.
+                // Parser failure is not fatal – we will fall back to regex heuristics below.
             }
 
-            // Jeżeli ScriptDom coś znalazł – wykorzystujemy to i kończymy.
+            // If ScriptDom gave us anything (DML or DDL), use that and stop here.
             if (artifacts.Count > 0)
                 return artifacts;
 
-            // 2) Fallback: heurystyczny regex (to, co wcześniej już przechodziło testy).
-            // Szukamy FROM / JOIN / INTO / UPDATE / MERGE / DELETE FROM z "schema.table".
+            // 2) Fallback: heuristic regex (legacy behaviour).
+            // Looks for FROM / JOIN / INTO / UPDATE / MERGE / DELETE FROM with "schema.table".
             var pattern = @"\b(?:FROM|JOIN|INTO|UPDATE|MERGE|DELETE\s+FROM)\s+((?:\[[^\]]+\]|\w+)\.)?(\[[^\]]+\]|\w+)";
             var matches = Regex.Matches(sql, pattern, RegexOptions.IgnoreCase);
 
@@ -738,10 +775,9 @@ namespace RoslynIndexer.Core.Sql
                     continue;
 
                 var identifier = string.Format(
-                    "{0}.{1}|{2}|inline@{3}:L{4}",
+                    "{0}.{1}|TABLE_OR_VIEW|inline@{2}:L{3}",
                     schema,
                     name,
-                    "TABLE_OR_VIEW",
                     relPath,
                     lineNumber);
 
@@ -753,6 +789,77 @@ namespace RoslynIndexer.Core.Sql
 
             return artifacts;
         }
+
+        /// <summary>
+        /// Collects child tables from inline DDL statements that define
+        /// FOREIGN KEY constraints. This is used only when MiniSqlRefCollector
+        /// found no DML-style references (pure CREATE/ALTER TABLE snippet).
+        /// </summary>
+        private sealed class InlineDdlForeignKeyCollector : TSqlFragmentVisitor
+        {
+            // We allow nullable here to play nicely with nullable annotations and
+            // only add non-empty values (we guard with checks before Add).
+            public readonly List<(string? Schema, string? Name)> Children =
+                new List<(string? Schema, string? Name)>();
+
+            public override void Visit(CreateTableStatement node)
+            {
+                if (node == null)
+                    return;
+
+                var definition = node.Definition;
+                if (definition == null || definition.TableConstraints == null)
+                    return;
+
+                // Only interested in tables that actually declare FK constraints.
+                if (!definition.TableConstraints.OfType<ForeignKeyConstraintDefinition>().Any())
+                    return;
+
+                var objName = node.SchemaObjectName;
+                if (objName == null)
+                    return;
+
+                var name = objName.BaseIdentifier?.Value;
+                if (string.IsNullOrWhiteSpace(name))
+                    return;
+
+                var schema = objName.SchemaIdentifier?.Value;
+                if (string.IsNullOrWhiteSpace(schema))
+                    schema = "dbo";
+
+                Children.Add((schema, name));
+            }
+
+            public override void Visit(AlterTableAddTableElementStatement node)
+            {
+                if (node == null)
+                    return;
+
+                var objName = node.SchemaObjectName;
+                if (objName == null)
+                    return;
+
+                // Definition is a TableDefinition that can contain constraints.
+                var tableDef = node.Definition as TableDefinition;
+                if (tableDef == null || tableDef.TableConstraints == null)
+                    return;
+
+                // Again, we only care if there is at least one FK constraint.
+                if (!tableDef.TableConstraints.OfType<ForeignKeyConstraintDefinition>().Any())
+                    return;
+
+                var name = objName.BaseIdentifier?.Value;
+                if (string.IsNullOrWhiteSpace(name))
+                    return;
+
+                var schema = objName.SchemaIdentifier?.Value;
+                if (string.IsNullOrWhiteSpace(schema))
+                    schema = "dbo";
+
+                Children.Add((schema, name));
+            }
+        }
+
 
         private sealed class MethodContext
         {

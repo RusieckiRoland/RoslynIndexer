@@ -484,10 +484,269 @@ namespace RoslynIndexer.Core.Sql
                     }
                 }
 
-                // After all entities are processed, append POCO bodies to sql_bodies.jsonl.
-                AppendEntityBodiesToJsonl(outDir, pocoBodies.Values.ToList());
+             
+            }
+          
+            AppendEntityBodiesToJsonl(outDir, pocoBodies.Values.ToList());
+            AppendEfFluentForeignKeyEdges(trees, entityMap, nodes, edges);
+
+        }
+
+        /// <summary>
+        /// Detects ForeignKey relationships defined via EF Fluent API
+        /// (HasOne/HasMany + HasForeignKey) and emits TABLE→TABLE (ForeignKey) edges.
+        /// </summary>
+        private static void AppendEfFluentForeignKeyEdges(
+            IEnumerable<SyntaxTree> trees,
+            Dictionary<string, Tuple<string, string>> entityMap,
+            ConcurrentDictionary<string, NodeRow> nodes,
+            List<EdgeRow> edges)
+        {
+            if (trees == null)
+                return;
+
+            foreach (var tree in trees)
+            {
+                if (tree == null)
+                    continue;
+
+                var root = tree.GetRoot();
+                if (root == null)
+                    continue;
+
+                // Look for Fluent API chains that end with:
+                //   .HasOne(...).WithMany(...).HasForeignKey(...)
+                //   .HasMany(...).WithOne(...).HasForeignKey(...)
+                // We always walk the chain backwards from HasForeignKey to find
+                // the HasOne/HasMany segment and the root Entity<T>() call.
+                foreach (var invocation in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
+                {
+                    if (invocation.Expression is not MemberAccessExpressionSyntax fkMember)
+                        continue;
+
+                    if (!string.Equals(fkMember.Name.Identifier.Text, "HasForeignKey", StringComparison.Ordinal))
+                        continue;
+
+                    // Step 1: walk back to the HasOne/HasMany invocation in the chain.
+                    InvocationExpressionSyntax navInvocation = null;
+                    MemberAccessExpressionSyntax navMember = null;
+
+                    ExpressionSyntax currentExpr = fkMember.Expression;
+                    while (currentExpr is InvocationExpressionSyntax currentInv)
+                    {
+                        if (currentInv.Expression is not MemberAccessExpressionSyntax currentMember)
+                            break;
+
+                        var nameText = currentMember.Name.Identifier.Text;
+                        if (string.Equals(nameText, "HasOne", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(nameText, "HasMany", StringComparison.OrdinalIgnoreCase))
+                        {
+                            navInvocation = currentInv;
+                            navMember = currentMember;
+                            break;
+                        }
+
+                        // Skip WithMany / WithOne / etc. and keep walking left.
+                        currentExpr = currentMember.Expression;
+                    }
+
+                    if (navInvocation == null || navMember == null)
+                        continue;
+
+                    var navName = navMember.Name.Identifier.Text;
+                    var isHasOne = string.Equals(navName, "HasOne", StringComparison.OrdinalIgnoreCase);
+                    var isHasMany = string.Equals(navName, "HasMany", StringComparison.OrdinalIgnoreCase);
+                    if (!isHasOne && !isHasMany)
+                        continue;
+
+                    // Step 2: resolve relatedType from HasOne/HasMany generic argument
+                    // or from simple lambda body (c => c.Parent).
+                    string relatedType = null;
+
+                    // Generic form: HasOne<Parent>() / HasMany<Child>()
+                    if (navMember.Name is GenericNameSyntax hasGeneric &&
+                        hasGeneric.TypeArgumentList != null &&
+                        hasGeneric.TypeArgumentList.Arguments.Count == 1)
+                    {
+                        relatedType = hasGeneric.TypeArgumentList.Arguments[0].ToString().Trim();
+                    }
+
+                    // Expression form: HasOne(c => c.Parent)
+                    if (string.IsNullOrWhiteSpace(relatedType) &&
+                        navInvocation.ArgumentList != null &&
+                        navInvocation.ArgumentList.Arguments.Count > 0)
+                    {
+                        var firstArgExpr = navInvocation.ArgumentList.Arguments[0].Expression;
+                        if (firstArgExpr is SimpleLambdaExpressionSyntax lambda)
+                        {
+                            var body = lambda.Body;
+
+                            if (body is MemberAccessExpressionSyntax bodyAccess)
+                            {
+                                // c => c.Parent  -> "Parent"
+                                relatedType = bodyAccess.Name.Identifier.Text;
+                            }
+                            else if (body is IdentifierNameSyntax id)
+                            {
+                                relatedType = id.Identifier.Text;
+                            }
+                        }
+                    }
+
+                    if (string.IsNullOrWhiteSpace(relatedType))
+                        continue;
+
+                    // Step 3: walk back from HasOne/HasMany to find the Entity<T>() root.
+                    string entityType = null;
+
+                    ExpressionSyntax entityExpr = navMember.Expression;
+                    while (entityExpr is InvocationExpressionSyntax entityInv)
+                    {
+                        if (entityInv.Expression is not MemberAccessExpressionSyntax entityMember)
+                            break;
+
+                        // We only care about "...Entity<Child>()" part.
+                        if (entityMember.Name is GenericNameSyntax entityGeneric &&
+                            string.Equals(entityGeneric.Identifier.Text, "Entity", StringComparison.Ordinal) &&
+                            entityGeneric.TypeArgumentList.Arguments.Count == 1)
+                        {
+                            entityType = entityGeneric.TypeArgumentList.Arguments[0].ToString().Trim();
+                            break;
+                        }
+
+                        entityExpr = entityMember.Expression;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(entityType))
+                        continue;
+
+                    // Step 4: map EF types -> TABLE (schema, name).
+                    string entitySchema, entityTable;
+                    string relatedSchema, relatedTable;
+
+                    if (!TryResolveEntityToTable(entityType, entityMap, out entitySchema, out entityTable))
+                        continue;
+
+                    if (!TryResolveEntityToTable(relatedType, entityMap, out relatedSchema, out relatedTable))
+                        continue;
+
+                    // Decide direction:
+                    //  - Entity<Child>().HasOne(Parent)  => Child -> Parent
+                    //  - Entity<Parent>().HasMany(Child) => Child -> Parent
+                    string childSchema, childTable, parentSchema, parentTable;
+
+                    if (isHasOne)
+                    {
+                        childSchema = entitySchema;
+                        childTable = entityTable;
+                        parentSchema = relatedSchema;
+                        parentTable = relatedTable;
+                    }
+                    else
+                    {
+                        childSchema = relatedSchema;
+                        childTable = relatedTable;
+                        parentSchema = entitySchema;
+                        parentTable = entityTable;
+                    }
+
+                    var childKey = $"{childSchema}.{childTable}|TABLE";
+                    var parentKey = $"{parentSchema}.{parentTable}|TABLE";
+
+                    var childName = childTable;
+                    var parentName = parentTable;
+
+                    // Ensure TABLE nodes exist for both ends (same pattern as other EF edges).
+                    nodes.TryAdd(
+                        childKey,
+                        new NodeRow(
+                            childKey,
+                            "TABLE",
+                            childName,
+                            childSchema,
+                            tree.FilePath ?? string.Empty,
+                            null,
+                            "ef",
+                            null));
+
+                    nodes.TryAdd(
+                        parentKey,
+                        new NodeRow(
+                            parentKey,
+                            "TABLE",
+                            parentName,
+                            parentSchema,
+                            tree.FilePath ?? string.Empty,
+                            null,
+                            "ef",
+                            null));
+
+                    // Finally: TABLE -> TABLE (ForeignKey).
+                    edges.Add(
+                        new EdgeRow(
+                            childKey,
+                            parentKey,
+                            "ForeignKey",
+                            "TABLE",
+                            tree.FilePath ?? string.Empty,
+                            null));
+                }
             }
         }
+
+
+        /// <summary>
+        /// Resolves EF entity type name to (schema, table) using entityMap + EF conventions.
+        /// </summary>
+        private static bool TryResolveEntityToTable(
+            string entityType,
+            Dictionary<string, Tuple<string, string>> entityMap,
+            out string schema,
+            out string tableName)
+        {
+            schema = "dbo";
+            tableName = null;
+
+            if (string.IsNullOrWhiteSpace(entityType))
+                return false;
+
+            var simple = entityType.Split('.').Last();
+
+            if (entityMap != null)
+            {
+                Tuple<string, string> map;
+
+                // 1) Exact key, e.g. "MiniEf.Child"
+                if (entityMap.TryGetValue(entityType, out map))
+                {
+                    schema = string.IsNullOrWhiteSpace(map.Item1) ? "dbo" : map.Item1;
+                    tableName = !string.IsNullOrWhiteSpace(map.Item2) ? map.Item2 : simple;
+                    return !string.IsNullOrWhiteSpace(tableName);
+                }
+
+                // 2) Simple key, e.g. "Child"
+                if (!string.IsNullOrWhiteSpace(simple) &&
+                    entityMap.TryGetValue(simple, out map))
+                {
+                    schema = string.IsNullOrWhiteSpace(map.Item1) ? "dbo" : map.Item1;
+                    tableName = !string.IsNullOrWhiteSpace(map.Item2) ? map.Item2 : simple;
+                    return !string.IsNullOrWhiteSpace(tableName);
+                }
+            }
+
+            // 3) Pure convention: dbo.SimpleName
+            if (!string.IsNullOrWhiteSpace(simple))
+            {
+                tableName = simple;
+                return true;
+            }
+
+            return false;
+        }
+
+
+
+
 
         private static void AppendEfMigrationEdgesAndNodes(
             IEnumerable<string> codeRoots,
@@ -1984,24 +2243,7 @@ namespace RoslynIndexer.Core.Sql
 
         private static string Key(SchemaObjectName n, string kind) => NameKey(n) + "|" + kind;
 
-        private static bool LooksLikeSqlLiteral(string value)
-        {
-            if (string.IsNullOrWhiteSpace(value))
-                return false;
-
-            var v = value.Trim();
-
-            // Very small, cheap heuristic – enough for our test sample
-            // and safe not to treat normal text as SQL.
-            v = v.ToLowerInvariant();
-            return v.Contains("select ")
-                   || v.Contains("insert ")
-                   || v.Contains("update ")
-                   || v.Contains("delete ")
-                   || v.Contains("merge ")
-                   || v.Contains("from ")
-                   || v.Contains("into ");
-        }
+       
 
         private static Tuple<SchemaObjectName, string, TSqlFragment> MakePseudoDefine(string file, int bi, string kind)
         {
