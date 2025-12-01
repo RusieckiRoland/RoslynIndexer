@@ -763,10 +763,10 @@ WHERE c.IsActive = 1;
                 sb.AppendLine("    \"inlineSqlRoot\":  " + JsonString(projectDir) + ",");
 
                 // Legacy aliases (not required, but kept for compatibility)
-               
-            
-           
-                
+
+
+
+
                 sb.AppendLine("  },");
                 sb.AppendLine("  \"dbGraph\": {");
                 sb.AppendLine("    \"entityBaseTypes\": []");
@@ -818,6 +818,192 @@ WHERE c.IsActive = 1;
                 Assert.IsTrue(
                     edgesLines.Length > 1,
                     "Expected at least one data row in edges.csv for inline-only run (inline SQL should produce edges).");
+
+                // --- New, stricter assertions for inline-SQL wiring ---
+
+                // 1) METHOD node for RawSql.LoadCustomers should exist.
+                Assert.IsTrue(
+                    nodesLines.Any(l =>
+                        l.Contains("RawSql.LoadCustomers", StringComparison.Ordinal) &&
+                        l.Contains("|METHOD", StringComparison.Ordinal)),
+                    "Expected METHOD node for InlineSqlSample.RawSql.LoadCustomers in nodes.csv.");
+
+                // 2) ReadsFrom edge: METHOD -> dbo.Customer|TABLE_OR_VIEW
+                //    We only assert on substrings to stay robust to exact key formatting.
+                Assert.IsTrue(
+                    edgesLines.Any(l =>
+                        l.Contains("RawSql.LoadCustomers", StringComparison.Ordinal) &&
+                        l.Contains("dbo.Customer", StringComparison.Ordinal) &&
+                        l.Contains("ReadsFrom", StringComparison.Ordinal)),
+                    "Expected ReadsFrom edge from RawSql.LoadCustomers METHOD to dbo.Customer in edges.csv.");
+            }
+            finally
+            {
+                CleanupTestRoot(testRoot);
+            }
+        }
+
+        [TestMethod]
+        public void InlineSql_ForeignKey_ProducesTableToTableForeignKeyEdges()
+        {
+            // Root for this test run
+            var testRoot = Path.Combine(
+                Path.GetTempPath(),
+                "RoslynIndexer_E2E_InlineSql_FK_" + Guid.NewGuid().ToString("N"));
+
+            Directory.CreateDirectory(testRoot);
+
+            try
+            {
+                // 1) Folder structure – bardzo podobna do InlineSqlOnly_ProducesGraphNodesAndEdges
+                var solutionDir = Path.Combine(testRoot, "InlineSqlFkSolution");
+                var projectDir = Path.Combine(solutionDir, "InlineSqlFkProject");
+                var sqlDir = Path.Combine(solutionDir, "sqlEmpty");
+                var tempRoot = Path.Combine(testRoot, "temp");
+                var outDir = Path.Combine(testRoot, "out");
+
+                Directory.CreateDirectory(solutionDir);
+                Directory.CreateDirectory(projectDir);
+                Directory.CreateDirectory(sqlDir);
+                Directory.CreateDirectory(tempRoot);
+                Directory.CreateDirectory(outDir);
+
+                var solutionPath = Path.Combine(solutionDir, "InlineSqlFkSolution.sln");
+                var projectPath = Path.Combine(projectDir, "InlineSqlFkProject.csproj");
+                var configPath = Path.Combine(testRoot, "config_inline_fk.json");
+
+                // 2) Minimal solution + project
+                CreateMinimalSln(solutionPath, projectPath);
+                CreateMinimalProjectFile(projectPath);
+
+                // 3) C# with inline DDL that contains FOREIGN KEY ... REFERENCES ...,
+                //    PLUS a SELECT, żeby InlineSqlScanner na pewno potraktował to jako SQL.
+                var inlineCode = """
+using System;
+using System.Collections.Generic;
+using System.Data;
+
+namespace InlineSqlFkSample
+{
+    public sealed class Parent
+    {
+        public int Id { get; set; }
+    }
+
+    public sealed class Child
+    {
+        public int Id { get; set; }
+        public int ParentId { get; set; }
+    }
+
+    public static class RawSqlWithFk
+    {
+        public static IEnumerable<Child> LoadChildren(IDbConnection connection)
+        {
+            const string sql = @"
+CREATE TABLE dbo.Parent
+(
+    Id INT NOT NULL PRIMARY KEY
+);
+
+CREATE TABLE dbo.Child
+(
+    Id       INT NOT NULL PRIMARY KEY,
+    ParentId INT NOT NULL,
+    CONSTRAINT FK_Child_Parent
+        FOREIGN KEY (ParentId)
+        REFERENCES dbo.Parent(Id)
+);
+
+SELECT ch.Id, ch.ParentId
+FROM dbo.Child AS ch
+WHERE ch.ParentId > 0;
+";
+
+            // For the test it is enough that the SQL literal is present in IL.
+            Console.WriteLine(sql);
+
+            return Array.Empty<Child>();
+        }
+    }
+}
+""";
+
+                var inlineFilePath = Path.Combine(projectDir, "InlineSqlFkSample.cs");
+                File.WriteAllText(inlineFilePath, inlineCode, Encoding.UTF8);
+
+                // 4) Config: inline-only scenario – identyczny wzór jak w InlineSqlOnly_ProducesGraphNodesAndEdges
+                var sb = new StringBuilder();
+
+                sb.AppendLine("{");
+                sb.AppendLine("  \"paths\": {");
+                sb.AppendLine("    \"solution\":   " + JsonString(solutionPath) + ",");
+                sb.AppendLine("    \"tempRoot\":   " + JsonString(tempRoot) + ",");
+                sb.AppendLine("    \"outRoot\":        " + JsonString(outDir) + ",");
+
+                // New keys used by Program.Net9
+                sb.AppendLine("    \"sqlRoot\":        " + JsonString(sqlDir) + ",");
+                sb.AppendLine("    \"modelRoot\":      \"\",");
+                sb.AppendLine("    \"migrationsRoot\": \"\",");
+                sb.AppendLine("    \"inlineSqlRoot\":  " + JsonString(projectDir) + ",");
+
+                // (Legacy aliases tutaj pomijamy – tak jak w teście InlineSqlOnly)
+                sb.AppendLine("  },");
+                sb.AppendLine("  \"dbGraph\": {");
+                sb.AppendLine("    \"entityBaseTypes\": []");
+                sb.AppendLine("  }");
+                sb.AppendLine("}");
+
+                File.WriteAllText(configPath, sb.ToString(), Encoding.UTF8);
+
+                // 5) Run RoslynIndexer.Net9 with this config
+                RunRoslynIndexerNet9WithConfig(configPath).GetAwaiter().GetResult();
+
+                // 6) ZIP → rozpakowujemy i czytamy graph artifacts
+                var zipFiles = Directory.EnumerateFiles(outDir, "*.zip").ToList();
+                Assert.IsTrue(zipFiles.Count >= 1,
+                    "Expected at least one ZIP archive in the 'out' folder for inline-FK run.");
+
+                var firstZip = zipFiles[0];
+
+                var unpackRoot = Path.Combine(testRoot, "unzipped_fk");
+                Directory.CreateDirectory(unpackRoot);
+                ZipFile.ExtractToDirectory(firstZip, unpackRoot);
+
+                var sqlBundleRoot = Path.Combine(unpackRoot, "sql_code_bundle");
+                var docsDir = Path.Combine(sqlBundleRoot, "docs");
+                var graphDir = Path.Combine(sqlBundleRoot, "graph");
+
+                var sqlBodiesPath = Path.Combine(docsDir, "sql_bodies.jsonl");
+                var nodesCsvPath = Path.Combine(graphDir, "nodes.csv");
+                var edgesCsvPath = Path.Combine(graphDir, "edges.csv");
+
+                Assert.IsTrue(File.Exists(sqlBodiesPath),
+                    "Expected sql_bodies.jsonl to be produced in inline-FK mode (even if minimal).");
+                Assert.IsTrue(File.Exists(nodesCsvPath),
+                    "Expected nodes.csv to be produced in inline-FK mode.");
+                Assert.IsTrue(File.Exists(edgesCsvPath),
+                    "Expected edges.csv to be produced in inline-FK mode.");
+
+                var nodesLines = File.ReadAllLines(nodesCsvPath);
+                var edgesLines = File.ReadAllLines(edgesCsvPath);
+
+                // sanity: coś faktycznie zostało wygenerowane
+                Assert.IsTrue(
+                    nodesLines.Length > 1,
+                    "Expected at least one data row in nodes.csv for inline-FK run.");
+                Assert.IsTrue(
+                    edgesLines.Length > 1,
+                    "Expected at least one data row in edges.csv for inline-FK run.");
+
+                // --- Główna asercja: TABLE -> TABLE (ForeignKey) z inline DDL ---
+
+                Assert.IsTrue(
+                    edgesLines.Any(l =>
+                        l.Contains("dbo.Child|TABLE", StringComparison.Ordinal) &&
+                        l.Contains("dbo.Parent|TABLE", StringComparison.Ordinal) &&
+                        l.Contains("ForeignKey", StringComparison.Ordinal)),
+                    "Expected ForeignKey edge: dbo.Child|TABLE -> dbo.Parent|TABLE to be present in edges.csv for inline-FK run.");
             }
             finally
             {

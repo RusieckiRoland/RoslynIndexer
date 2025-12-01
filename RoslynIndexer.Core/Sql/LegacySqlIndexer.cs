@@ -1015,11 +1015,12 @@ namespace RoslynIndexer.Core.Sql
         ///
         /// This method is NOT yet wired into RunBuild; it is safe/unused until the switch.
         /// </summary>
+
         private static void AppendInlineSqlEdgesAndNodes_FromArtifacts(
-        IEnumerable<SqlArtifact> artifacts,
-        string sqlRoot,
-        ConcurrentDictionary<string, NodeRow> nodes,
-        List<EdgeRow> edges)
+    IEnumerable<SqlArtifact> artifacts,
+    string sqlRoot,
+    ConcurrentDictionary<string, NodeRow> nodes,
+    List<EdgeRow> edges)
         {
             if (artifacts == null)
             {
@@ -1097,7 +1098,7 @@ namespace RoslynIndexer.Core.Sql
 
                     var tableKey = string.Format("{0}.{1}|{2}", schema, name, kind);
 
-                    // For now, relation is always ReadsFrom – matches the original spec.
+                    // METHOD -> TABLE_OR_VIEW (ReadsFrom), same as before.
                     edges.Add(new EdgeRow(
                         from: methodKey,
                         to: tableKey,
@@ -1107,12 +1108,151 @@ namespace RoslynIndexer.Core.Sql
                         batch: null));
 
                     addedEdges++;
+
+                    // NEW: TABLE -> TABLE (ForeignKey) edges from inline SQL
+                    addedEdges += AppendInlineSqlForeignKeyEdgesFromArtifact(
+                        artifact: art,
+                        fileRel: fileRel,
+                        edges: edges);
                 }
             }
 
             ConsoleLog.Info(
                 $"Inline-SQL (scanner): added {addedMethods} METHOD node(s) and {addedEdges} edge(s) from SqlArtifact stream.");
         }
+
+        /// <summary>
+        /// Detects FOREIGN KEY ... REFERENCES ... patterns in an inline SQL snippet
+        /// and appends TABLE -> TABLE (ForeignKey) edges.
+        /// Returns the number of added edges.
+        /// </summary>
+        private static int AppendInlineSqlForeignKeyEdgesFromArtifact(
+            SqlArtifact artifact,
+            string fileRel,
+            List<EdgeRow> edges)
+        {
+            if (artifact == null)
+                return 0;
+
+            var body = artifact.Body;
+            if (string.IsNullOrWhiteSpace(body))
+                return 0;
+
+            // Cheap guard: avoid regex work when obviously not a FK definition.
+            if (body.IndexOf("FOREIGN KEY", StringComparison.OrdinalIgnoreCase) < 0 ||
+                body.IndexOf("REFERENCES", StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                return 0;
+            }
+
+            // Child table comes from InlineSQL identifier (same logic as for ReadsFrom).
+            if (!TryParseInlineSqlIdentifier(artifact.Identifier, out var childSchema, out var childTable, out var _))
+                return 0;
+
+            if (string.IsNullOrWhiteSpace(childTable))
+                return 0;
+
+            var effectiveChildSchema = string.IsNullOrWhiteSpace(childSchema) ? "dbo" : childSchema;
+            var childKey = string.Format("{0}.{1}|TABLE", effectiveChildSchema, childTable);
+
+            int added = 0;
+
+            foreach (var parent in ExtractForeignKeyTargetsFromInlineBody(body, effectiveChildSchema))
+            {
+                var parentSchema = parent.Item1;
+                var parentTable = parent.Item2;
+
+                if (string.IsNullOrWhiteSpace(parentTable))
+                    continue;
+
+                var parentKey = string.Format("{0}.{1}|TABLE", parentSchema, parentTable);
+
+                edges.Add(new EdgeRow(
+                    from: childKey,
+                    to: parentKey,
+                    relation: "ForeignKey",
+                    toKind: "TABLE",
+                    file: fileRel,
+                    batch: null));
+
+                added++;
+            }
+
+            return added;
+        }
+
+
+        /// <summary>
+        /// Extracts referenced table identifiers from inline SQL FOREIGN KEY definitions.
+        /// This is a lightweight, text-based parser for common
+        /// "FOREIGN KEY (...) REFERENCES [schema].[Table](...)" patterns.
+        /// </summary>
+        private static IEnumerable<Tuple<string, string>> ExtractForeignKeyTargetsFromInlineBody(
+            string body,
+            string defaultSchema)
+        {
+            if (string.IsNullOrWhiteSpace(body))
+                yield break;
+
+            // Very small, culture-invariant regex; it does not try to cover all T-SQL,
+            // just enough to capture typical FOREIGN KEY ... REFERENCES patterns.
+            var regex = new Regex(
+                @"\bFOREIGN\s+KEY\b[^;]*?\bREFERENCES\b\s+(?<table>(\[[^\]]+\]|[A-Za-z_][A-Za-z0-9_]*)(\s*\.\s*(\[[^\]]+\]|[A-Za-z_][A-Za-z0-9_]*))?)",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Singleline);
+
+            foreach (Match match in regex.Matches(body))
+            {
+                if (!match.Success)
+                    continue;
+
+                var raw = match.Groups["table"].Value;
+                if (string.IsNullOrWhiteSpace(raw))
+                    continue;
+
+                raw = raw.Trim();
+
+                string schema;
+                string name;
+
+                var parts = raw.Split('.');
+                if (parts.Length == 2)
+                {
+                    schema = UnwrapInlineIdentifierPart(parts[0]);
+                    name = UnwrapInlineIdentifierPart(parts[1]);
+                }
+                else
+                {
+                    schema = string.IsNullOrWhiteSpace(defaultSchema) ? "dbo" : defaultSchema;
+                    name = UnwrapInlineIdentifierPart(raw);
+                }
+
+                if (string.IsNullOrWhiteSpace(name))
+                    continue;
+
+                yield return Tuple.Create(schema, name);
+            }
+        }
+
+        /// <summary>
+        /// Removes brackets and quotes from identifier parts like [dbo], [Order], "dbo".
+        /// </summary>
+        private static string UnwrapInlineIdentifierPart(string part)
+        {
+            if (string.IsNullOrEmpty(part))
+                return string.Empty;
+
+            var p = part.Trim();
+
+            if (p.Length >= 2 && p[0] == '[' && p[p.Length - 1] == ']')
+            {
+                p = p.Substring(1, p.Length - 2);
+            }
+
+            p = p.Trim('"', '\'');
+
+            return p.Trim();
+        }
+
 
         /// <summary>
         /// New inline-SQL path: use InlineSqlScanner to produce SqlArtifact
