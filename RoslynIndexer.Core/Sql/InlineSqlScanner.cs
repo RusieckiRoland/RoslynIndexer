@@ -20,7 +20,7 @@ namespace RoslynIndexer.Core.Sql
     ///  - emits SqlArtifact with ArtifactKind = "InlineSQL".
     ///
     /// The goal is to produce stable identifiers that RAG can consume,
-    /// without touching LegacySqlIndexer (graph builder).
+    /// without touching SqlEfGraphIndexer (graph builder).
     /// </summary>
     public static class InlineSqlScanner
     {
@@ -980,7 +980,7 @@ namespace RoslynIndexer.Core.Sql
 
         /// <summary>
         /// Minimal collector for table/proc references inside a SQL fragment.
-        /// This is intentionally small and duplicated from LegacySqlIndexer logic
+        /// This is intentionally small and duplicated from SqlEfGraphIndexer logic
         /// to avoid cross-coupling Core pipeline with the graph builder.
         /// </summary>
         private sealed class MiniSqlRefCollector : TSqlFragmentVisitor

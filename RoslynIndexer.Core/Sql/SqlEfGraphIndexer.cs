@@ -1,4 +1,4 @@
-﻿// RoslynIndexer.Core/Sql/LegacySqlIndexer.cs
+﻿// RoslynIndexer.Core/Sql/SqlEfGraphIndexer.cs
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -23,7 +23,7 @@ namespace RoslynIndexer.Core.Sql
     /// Exact legacy-compatible SQL/EF indexer.
     /// Writes: sql_bundle/graph/{nodes.csv,edges.csv,graph.json}, docs/bodies/*, manifest.json
     /// </summary>
-    public static class LegacySqlIndexer
+    public static class SqlEfGraphIndexer
     {
         // ========================================================
         //  SQL indexing (legacy)
@@ -60,7 +60,7 @@ namespace RoslynIndexer.Core.Sql
         {
             try
             {
-                // Optional: load dbGraph config when LegacySqlIndexer is used directly
+                // Optional: load dbGraph config when SqlEfGraphIndexer is used directly
                 // (e.g. in EntityBaseTypesTests). In CLI mode Program.Net9 already
                 // sets GlobalDbGraphConfig from the main config.json – a separate
                 // config.json in outputDir simply nie istnieje, więc niczego tu nie nadpiszemy.
@@ -2383,7 +2383,7 @@ namespace RoslynIndexer.Core.Sql
                 edgeCount: edges.Count,
                 bodiesCount: bodiesJsonlCount);
 
-            ConsoleLog.Info("LegacySqlIndexer finished.");
+            ConsoleLog.Info("SqlEfGraphIndexer finished.");
             return 0;
         }
 

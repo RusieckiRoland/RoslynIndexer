@@ -16,7 +16,7 @@ namespace RoslynIndexer.Core.Sql.EfMigrations
     /// <summary>
     /// Lightweight FluentMigrator / EF-style migrations analyzer.
     /// Parses migration classes and extracts table/index/data operations into a neutral model.
-    /// No coupling to runners or graph format – intended to be called from LegacySqlIndexer
+    /// No coupling to runners or graph format – intended to be called from SqlEfGraphIndexer
     /// and future graph builders.
     /// </summary>
     public sealed class EfMigrationAnalyzer

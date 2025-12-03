@@ -22,7 +22,7 @@ namespace RoslynIndexer.Net9.Tests.EndToEnd
     /// - graph artifacts (nodes.csv, edges.csv, graph.json) contain expected nodes and edges.
     ///
     /// This test is based purely on the current code:
-    ///  - LegacySqlIndexer.BuildSqlKnowledge for .sql bodies and graph,
+    ///  - SqlEfGraphIndexer.BuildSqlKnowledge for .sql bodies and graph,
     ///  - InlineSqlScanner + AppendInlineSqlEdgesAndNodes_FromArtifacts +
     ///    AppendInlineSqlBodiesToJsonl for inline SQL.
     /// </summary>

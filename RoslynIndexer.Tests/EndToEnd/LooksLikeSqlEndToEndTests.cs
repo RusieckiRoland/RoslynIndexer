@@ -81,7 +81,7 @@ namespace RoslynIndexer.Tests.EndToEnd
                 //    - 100 strings that MUST NOT be treated as SQL (LooksLikeSql == false).
                 CreateLooksLikeSqlStressModel(projectDir);
 
-                // 4) Simple SQL script so LegacySqlIndexer has something to index
+                // 4) Simple SQL script so SqlEfGraphIndexer has something to index
                 CreateSqlScripts(sqlDir);
 
                 // 5) Config: SQL + inline SQL

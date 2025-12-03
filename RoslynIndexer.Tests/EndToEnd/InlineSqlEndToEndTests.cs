@@ -203,7 +203,7 @@ namespace RoslynIndexer.Net9.Tests.EndToEnd
                 // C# code containing different inline-SQL patterns
                 CreateMixedInlineSqlModel(projectDir);
 
-                // Simple SQL script so LegacySqlIndexer has something to index
+                // Simple SQL script so SqlEfGraphIndexer has something to index
                 CreateSqlScripts(sqlDir);
 
                 // Inline-SQL enabled via inlineSqlRoot

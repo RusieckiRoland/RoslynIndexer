@@ -78,7 +78,7 @@ namespace RoslynIndexer.Net9.Tests.EndToEnd
                 CreateMinimalSlnx(solutionPath, projectPath);
                 CreateMinimalProjectFile(projectPath);
 
-                // 3) Simple SQL script so LegacySqlIndexer has something to index
+                // 3) Simple SQL script so SqlEfGraphIndexer has something to index
                 CreateSqlScripts(sqlDir);
 
                 // 4) Config: .slnx + sqlRoot + modelRoot

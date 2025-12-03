@@ -94,13 +94,13 @@ namespace RoslynIndexer.Tests.CustomEntities
 
             try
             {
-                // --- 4) Odpalamy LegacySqlIndexer ---
-                var exitCode = LegacySqlIndexer.Start(
+                // --- 4) Odpalamy SqlEfGraphIndexer ---
+                var exitCode = SqlEfGraphIndexer.Start(
                     outputDir: outDir,
                     sqlProjectRoot: sqlRoot,
                     efRoot: efRoot);
 
-                Assert.AreEqual(0, exitCode, "LegacySqlIndexer failed (non-zero exit code).");
+                Assert.AreEqual(0, exitCode, "SqlEfGraphIndexer failed (non-zero exit code).");
 
                 var nodesCsv = Path.Combine(outDir, "graph", "nodes.csv");
                 Assert.IsTrue(File.Exists(nodesCsv), "nodes.csv was not generated.");

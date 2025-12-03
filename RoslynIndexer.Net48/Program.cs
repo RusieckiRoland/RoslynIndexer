@@ -7,7 +7,7 @@ using RoslynIndexer.Core.Helpers;       // ArchiveUtils
 using RoslynIndexer.Core.Models;
 using RoslynIndexer.Core.Pipeline;
 using RoslynIndexer.Core.Services;      // RepositoryScanner, FileHasher, CSharpAnalyzer
-using RoslynIndexer.Core.Sql;           // SqlEfGraphRunner, LegacySqlIndexer
+using RoslynIndexer.Core.Sql;           // SqlEfGraphRunner, SqlEfGraphIndexer
 using RoslynIndexer.Core.Logging;       // ConsoleLog
 
 using System;
@@ -99,22 +99,22 @@ namespace RoslynIndexer.Net48
                 ConsoleLog.Info("[CFG] Loaded: " + cfgPath);
                 ConsoleLog.Info("[CFG] Root properties: " + string.Join(", ", cfg.Properties().Select(p => p.Name)));
 
-                // Inject dbGraph config into LegacySqlIndexer
+                // Inject dbGraph config into SqlEfGraphIndexer
                 try
                 {
-                    LegacySqlIndexer.GlobalDbGraphConfig =
+                    SqlEfGraphIndexer.GlobalDbGraphConfig =
                         cfg != null ? DbGraphConfig.FromJson(cfg) : DbGraphConfig.Empty;
                 }
                 catch (Exception ex)
                 {
                     ConsoleLog.Warn("[dbGraph] Failed to parse dbGraph from main config.json: " + ex.Message);
-                    LegacySqlIndexer.GlobalDbGraphConfig = DbGraphConfig.Empty;
+                    SqlEfGraphIndexer.GlobalDbGraphConfig = DbGraphConfig.Empty;
                 }
             }
             else
             {
                 ConsoleLog.Info("[CFG] No config provided. Use --config \"D:\\\\config.json\"");
-                LegacySqlIndexer.GlobalDbGraphConfig = DbGraphConfig.Empty;
+                SqlEfGraphIndexer.GlobalDbGraphConfig = DbGraphConfig.Empty;
             }
 
             // ===============================
@@ -205,14 +205,14 @@ namespace RoslynIndexer.Net48
                 }
             }
 
-            LegacySqlIndexer.GlobalInlineSqlHotMethods = inlineSqlHotMethods;
+            SqlEfGraphIndexer.GlobalInlineSqlHotMethods = inlineSqlHotMethods;
 
-            // Global EF migrations + inline SQL roots for LegacySqlIndexer
-            LegacySqlIndexer.GlobalEfMigrationRoots = !string.IsNullOrWhiteSpace(efMigrationsPath)
+            // Global EF migrations + inline SQL roots for SqlEfGraphIndexer
+            SqlEfGraphIndexer.GlobalEfMigrationRoots = !string.IsNullOrWhiteSpace(efMigrationsPath)
                 ? new[] { efMigrationsPath }
                 : Array.Empty<string>();
 
-            LegacySqlIndexer.GlobalInlineSqlRoots = !string.IsNullOrWhiteSpace(inlineSql)
+            SqlEfGraphIndexer.GlobalInlineSqlRoots = !string.IsNullOrWhiteSpace(inlineSql)
                 ? new[] { inlineSql }
                 : Array.Empty<string>();
 
@@ -247,7 +247,7 @@ namespace RoslynIndexer.Net48
                 repoRoot: tempRoot,
                 solutionPath: solutionPath,
                 sqlPath: sqlPath,
-                efMigrationsPath: null,   // EF graph is handled separately by LegacySqlIndexer
+                efMigrationsPath: null,   // EF graph is handled separately by SqlEfGraphIndexer
                 inlineSqlPath: inlineSql
             );
 
@@ -271,7 +271,7 @@ namespace RoslynIndexer.Net48
             }
 
             // Inline-SQL fallback: if EF root is still empty but inlineSql is configured,
-            // use inlineSql as EF root so LegacySqlIndexer can scan C# for raw SQL usage.
+            // use inlineSql as EF root so SqlEfGraphIndexer can scan C# for raw SQL usage.
             if (string.IsNullOrWhiteSpace(efPath) && !string.IsNullOrWhiteSpace(inlineSql))
             {
                 efPath = inlineSql;

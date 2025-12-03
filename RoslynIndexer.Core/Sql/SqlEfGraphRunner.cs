@@ -65,7 +65,7 @@ namespace RoslynIndexer.Core.Sql
 
             // NOTE:
             // For now 'projectsFromSolution' is only resolved and logged.
-            // LegacySqlIndexer still uses sqlPath/efPath as before.
+            // SqlEfGraphIndexer still uses sqlPath/efPath as before.
             // In future we can use 'projectsFromSolution' to restrict EF/migrations/inline SQL scanning.
 
             // -------------------------------------------
@@ -111,7 +111,7 @@ namespace RoslynIndexer.Core.Sql
             Directory.CreateDirectory(sqlBundleRoot);
 
             // Run the legacy indexer (writes docs/graph/manifest.json under sql_code_bundle).
-            LegacySqlIndexer.Start(
+            SqlEfGraphIndexer.Start(
                 outputDir: sqlBundleRoot,
                 sqlProjectRoot: sqlRootForIndexer,
                 efRoot: hasEf ? efPath : null
