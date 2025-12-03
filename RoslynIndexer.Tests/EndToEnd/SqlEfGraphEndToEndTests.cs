@@ -226,8 +226,8 @@ namespace RoslynIndexer.Net9.Tests.EndToEnd
                     nodesLines.Any(l => l.Contains("|MIGRATION")),
                     "Did not expect any MIGRATION nodes in EF-only run (paths.migrations is empty).");
 
-                // Edges may legitimately be empty (no TABLE mapping in EF-only),
-                // więc nie wymuszamy żadnych relacji tutaj.
+                // Edges may legitimately be empty (no TABLE mapping in EF-only mode),
+                // so we do not assert any relationships here.
             }
             finally
             {
@@ -248,7 +248,7 @@ namespace RoslynIndexer.Net9.Tests.EndToEnd
 
             try
             {
-                // 1) Folder structure – bardzo podobna do InlineSqlOnly_ProducesGraphNodesAndEdges
+                // 1) Folder structure – very similar to InlineSqlOnly_ProducesGraphNodesAndEdges.
                 var solutionDir = Path.Combine(testRoot, "InlineSqlFkSolution");
                 var projectDir = Path.Combine(solutionDir, "InlineSqlFkProject");
                 var sqlDir = Path.Combine(solutionDir, "sqlEmpty");
@@ -269,8 +269,8 @@ namespace RoslynIndexer.Net9.Tests.EndToEnd
                 CreateMinimalSln(solutionPath, projectPath);
                 CreateMinimalProjectFile(projectPath);
 
-                // 3) C# with inline DDL that contains FOREIGN KEY ... REFERENCES ...,
-                //    PLUS a SELECT, żeby InlineSqlScanner na pewno potraktował to jako SQL.
+                // 3) C# with inline DDL that contains FOREIGN KEY . REFERENCES .
+                //    Plus a SELECT to ensure InlineSqlScanner reliably treats it as SQL.
                 var inlineCode = """
 using System;
 using System.Collections.Generic;
@@ -322,7 +322,7 @@ namespace InlineSqlFkSample
                 var inlineFilePath = Path.Combine(projectDir, "InlineSqlFkSample.cs");
                 File.WriteAllText(inlineFilePath, inlineCode, Encoding.UTF8);
 
-                // 4) Config: inline-only scenario – identyczny wzór jak w InlineSqlOnly_ProducesGraphNodesAndEdges
+                // 4) Config: inline-only scenario – same pattern as InlineSqlOnly_ProducesGraphNodesAndEdges.
                 var sb = new StringBuilder();
 
                 sb.AppendLine("{");
@@ -337,7 +337,7 @@ namespace InlineSqlFkSample
                 sb.AppendLine("    \"migrationsRoot\": \"\",");
                 sb.AppendLine("    \"inlineSqlRoot\":  " + JsonString(projectDir) + ",");
 
-                // (Legacy aliases tutaj pomijamy – tak jak w teście InlineSqlOnly)
+                // Legacy aliases are intentionally ignored here, just like in InlineSqlOnly.
                 sb.AppendLine("  },");
                 sb.AppendLine("  \"dbGraph\": {");
                 sb.AppendLine("    \"entityBaseTypes\": []");
@@ -349,7 +349,7 @@ namespace InlineSqlFkSample
                 // 5) Run RoslynIndexer.Net9 with this config
                 RunRoslynIndexerNet9WithConfig(configPath).GetAwaiter().GetResult();
 
-                // 6) ZIP → rozpakowujemy i czytamy graph artifacts
+                // 6) ZIP → unzip and inspect the graph artifacts.
                 var zipFiles = Directory.EnumerateFiles(outDir, "*.zip").ToList();
                 Assert.IsTrue(zipFiles.Count >= 1,
                     "Expected at least one ZIP archive in the 'out' folder for inline-FK run.");
@@ -869,8 +869,8 @@ WHERE c.IsActive = 1;
                 var projectPath = Path.Combine(projectDir, "MiniEfProject.csproj");
                 var configPath = Path.Combine(testRoot, "config.json");
 
-                // 2) Solution + project + minimal EF model (Customer/BaseEntity
-                //    tylko po to, żeby projekt się normalnie kompilował).
+                // 2) Solution + project + minimal EF model (Customer/BaseEntity)
+                //    only to keep the project compiling cleanly.
                 CreateMinimalSln(solutionPath, projectPath);
                 CreateMinimalProjectFile(projectPath);
                 CreateMiniEfModel(projectDir);
@@ -882,7 +882,7 @@ WHERE c.IsActive = 1;
                 //    - paths.sql        = ""          (no SQL files)
                 //    - paths.ef         = ""          (no explicit EF root)
                 //    - paths.migrations = migrationsDir
-                //    Program.Net9 zrobi fallback: efPath = migrationsPath
+                //    Program.Net9 will fall back to efPath = migrationsPath.
                 CreateConfigJson(
                     configPath,
                     solutionPath,
@@ -896,8 +896,8 @@ WHERE c.IsActive = 1;
                 // 5) Run RoslynIndexer.Net9 with this config
                 RunRoslynIndexerNet9WithConfig(configPath).GetAwaiter().GetResult();
 
-                // 6) Program.Net9 pakuje tempRoot do ZIP w outDir – artefakty
-                //    sprawdzamy wewnątrz ZIP-a.
+                // 6) Program.Net9 packs tempRoot into a ZIP under outDir –
+                //    we inspect the artifacts inside that ZIP.
                 var zipFiles = Directory.EnumerateFiles(outDir, "*.zip").ToList();
                 Assert.IsTrue(zipFiles.Count >= 1,
                     "Expected at least one ZIP archive in the 'out' folder for migrations-only run.");
@@ -1117,8 +1117,8 @@ WHERE c.IsActive = 1;
                 var projectPath = Path.Combine(projectDir, "MiniEfProject.csproj");
                 var configPath = Path.Combine(testRoot, "config.json");
 
-                // 2) Minimal solution + project (C# pipeline still needs a solution),
-                //    plus EF model tylko po to, żeby projekt był sensowny.
+                // 2) Minimal solution + project (the C# pipeline still requires a solution),
+                //    plus a tiny EF model just to keep the project meaningful.
                 CreateMinimalSln(solutionPath, projectPath);
                 CreateMinimalProjectFile(projectPath);
                 CreateMiniEfModel(projectDir);
@@ -1130,8 +1130,8 @@ WHERE c.IsActive = 1;
                 //    - paths.sql        = sqlDir
                 //    - paths.ef         = ""          (no EF root)
                 //    - paths.migrations = ""          (no migrations)
-                //    dbGraph.entityBaseTypes zostaje takie jak w helperze,
-                //    ale EF stage i tak się nie odpali (brak codeRoots).
+                //    dbGraph.entityBaseTypes stays as defined in the helper,
+                //    but the EF stage will not run anyway (no codeRoots configured).
                 CreateConfigJson(
                   configPath,
                   solutionPath,

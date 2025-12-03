@@ -242,9 +242,10 @@ internal class Program
         // 7) Legacy SQL/EF GRAPH (optional)
         // ===============================
         SqlEfGraphRunner.Run(
-            tempRoot: tempRoot,
-            sqlPath: sqlPath ?? string.Empty,
-            efPath: efPath ?? string.Empty);
+           tempRoot: tempRoot,
+           sqlPath: sqlPath ?? string.Empty,
+           efPath: efPath ?? string.Empty,
+           solutionPath: solutionPath);
 
 
         // ===============================
@@ -288,13 +289,13 @@ internal class Program
         {
             ConsoleLog.Info("[ZIP] Target out: " + (outDir ?? "(null)"));
 
-            // nazwij zip jak branch, spakuj bez folderu top-level
-            // i skopiuj do 'out' (doklej timestamp przy kolizji)
+            // Name the ZIP after the branch, pack without a top-level folder,
+            // and copy it to the configured 'out' directory (append a timestamp on collisions).
             var zipPath = ArchiveUtils.CreateZipAndDeleteForBranch(tempRoot, git.Branch, outDir);
 
             ConsoleLog.Info("[ZIP] Created: " + zipPath);
 
-            // jeżeli kopiowanie do 'out' nie wyszło, daj ostrzeżenie
+            // If copying to the 'out' directory fails, log a warning.
             if (!string.IsNullOrWhiteSpace(outDir))
             {
                 var outFull = Path.GetFullPath(outDir);
@@ -309,7 +310,7 @@ internal class Program
         }
 
         // ===============================
-        // Helpers (statyczne – bez przechwytywania lokalnych zmiennych)
+        // Helpers (static methods – do not capture any local state).
         // ===============================
         static Dictionary<string, string> ParseArgs(string[]? args)
         {
@@ -424,7 +425,7 @@ internal class Program
                     Environment.SetEnvironmentVariable("MSBuildExtensionsPath", msbExt32);
             }
 
-            // Opcjonalnie: TransformXml DLL – wylicz automatycznie
+            
             var transformXml = FirstNonEmpty(
                 FromCli(cli, "transformxml", "msbuild.transformxml"),
                 FromCfg(cfg, "externalTasks.TransformXml", baseDir, true),

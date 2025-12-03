@@ -15,9 +15,11 @@ namespace RoslynIndexer.Net48.Adapters
     internal sealed class MsBuildWorkspaceLoader : IWorkspaceLoader
     {
         // ---------- Single-line % + dot ticker ----------
+
+        // ---------- Single-line % + dot ticker ----------
         private sealed class DotTicker
         {
-            private static readonly object Gate = new();
+            private static readonly object Gate = new object();
             private static bool _open;
             private static bool _needHeaderAfterBreak;
             private static int _col;
@@ -31,7 +33,6 @@ namespace RoslynIndexer.Net48.Adapters
                     if (_open) return;
                     _percent = initialPercent;
                     ConsoleLog.Info($"[MSBuild {_percent,3}%] ");
-                    ConsoleLog.Flush(); // ensure header is visible immediately
                     _open = true;
                     _col = 0;
                     _needHeaderAfterBreak = false;
@@ -46,10 +47,11 @@ namespace RoslynIndexer.Net48.Adapters
                     if (p == _percent) return;
                     _percent = p;
 
+                    // After an error break, the header will be reprinted on the next Tick().
                     if (_needHeaderAfterBreak) return;
 
-                    ConsoleLog.Info($"\r[MSBuild {_percent,3}%] ");
-                    ConsoleLog.Flush(); // flush header rewrite
+                    // Normal in-line header update (carriage return to overwrite the same line).
+                    ConsoleLog.InfoLine($"\r[MSBuild {_percent,3}%] ", _percent);
                 }
             }
 
@@ -59,22 +61,21 @@ namespace RoslynIndexer.Net48.Adapters
                 {
                     if (!_open) return;
 
+                    // After a break, reprint the header before continuing the dot stream.
                     if (_needHeaderAfterBreak)
                     {
-                        ConsoleLog.Info($"[MSBuild {_percent,3}%] ");
-                        ConsoleLog.Flush();
+                        Console.Write($"[MSBuild {_percent,3}%] ");
                         _needHeaderAfterBreak = false;
                         _col = 0;
                     }
 
-                    ConsoleLog.Info(".");
-                    ConsoleLog.Flush(); // flush each dot
+                    Console.Write('.');
                     _col++;
 
+                    // Soft wrap on a single console line: reprint the header and reset the column counter.
                     if (_col >= Wrap)
                     {
-                        ConsoleLog.Info($"\r[MSBuild {_percent,3}%] ");
-                        ConsoleLog.Flush();
+                        Console.Write($"\r[MSBuild {_percent,3}%] ");
                         _col = 0;
                     }
                 }
@@ -87,7 +88,6 @@ namespace RoslynIndexer.Net48.Adapters
                     if (_open)
                     {
                         Console.WriteLine();
-                        ConsoleLog.Flush(); // make sure the line break renders now
                         _needHeaderAfterBreak = true;
                         _col = 0;
                     }
@@ -101,7 +101,6 @@ namespace RoslynIndexer.Net48.Adapters
                     if (_open)
                     {
                         Console.WriteLine();
-                        Console.Out.Flush(); // final flush
                         _open = false;
                         _col = 0;
                         _needHeaderAfterBreak = false;
@@ -109,6 +108,8 @@ namespace RoslynIndexer.Net48.Adapters
                 }
             }
         }
+
+
 
         // ---------- State for % calculation ----------
         private readonly object _progressGate = new object();
@@ -160,7 +161,11 @@ namespace RoslynIndexer.Net48.Adapters
                 ["SkipCompilerExecution"] = "true",
                 ["ProvideCommandLineArgs"] = "true",
                 ["BuildProjectReferences"] = "false",
-                ["ContinueOnError"] = "true"
+                ["ContinueOnError"] = "true",
+
+                // Disable static analysis to prevent external tool invocation during load.
+                ["RunCodeAnalysis"] = "false",
+                ["CodeAnalysisRuleSet"] = ""
             };
 
             var ws = MSBuildWorkspace.Create(props);
@@ -171,7 +176,7 @@ namespace RoslynIndexer.Net48.Adapters
                 {
                     // Always break the ticker line first, then print the error.
                     DotTicker.BreakLine();
-                    Console.Error.WriteLine($"[MSBuild-ERR] {e.Diagnostic.Message}");
+                    ConsoleLog.Error($"[MSBuild-ERR] {e.Diagnostic.Message}");
                 }
             };
 
@@ -206,7 +211,6 @@ namespace RoslynIndexer.Net48.Adapters
                             Thread.Sleep(delay);
                         }
                     }, token);
-
                 }
 
                 var solution = await ws.OpenSolutionAsync(solutionPath, progress, ct).ConfigureAwait(false);
@@ -215,7 +219,7 @@ namespace RoslynIndexer.Net48.Adapters
             catch (Exception ex)
             {
                 DotTicker.BreakLine();
-                Console.Error.WriteLine($"[MSBuild-ERR] {ex.GetType().Name}: {ex.Message}");
+                ConsoleLog.Error($"[MSBuild-ERR] {ex.GetType().Name}: {ex.Message}");
                 throw;
             }
             finally
@@ -238,11 +242,20 @@ namespace RoslynIndexer.Net48.Adapters
         {
             try
             {
+                bool isSlnx = slnPath.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase);
                 int total = 0;
+
                 foreach (var line in File.ReadLines(slnPath))
                 {
-                    if (!line.StartsWith("Project(", StringComparison.Ordinal)) continue;
+                    // Dla klasycznego .sln zachowujemy dotychczasowe zachowanie:
+                    // liczymy tylko linie Project(...)
+                    if (!isSlnx)
+                    {
+                        if (!line.StartsWith("Project(", StringComparison.Ordinal))
+                            continue;
+                    }
 
+                    // Dla .slnx NIE ma Project(...), ale ścieżki *.csproj itd.
                     if (line.IndexOf(".csproj", StringComparison.OrdinalIgnoreCase) >= 0
                         || line.IndexOf(".vbproj", StringComparison.OrdinalIgnoreCase) >= 0
                         || line.IndexOf(".fsproj", StringComparison.OrdinalIgnoreCase) >= 0)
@@ -250,13 +263,16 @@ namespace RoslynIndexer.Net48.Adapters
                         total++;
                     }
                 }
+
                 return total;
             }
             catch
             {
+                // Jakikolwiek problem z odczytem pliku => brak licznika, ale nie wywalamy procesu
                 return 0;
             }
         }
+
 
         private static int GetTickDelay()
         {

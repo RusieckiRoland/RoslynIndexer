@@ -16,7 +16,7 @@ namespace RoslynIndexer.Core.Sql
     {
         public IEnumerable<SqlArtifact> Extract(RepoPaths paths)
         {
-            // 1) klasyczne pliki .sql z paths.SqlPath
+            // 2) Inline SQL in C# files under paths.InlineSqlPath.
             if (!string.IsNullOrWhiteSpace(paths.SqlPath))
             {
                 var root = Path.GetFullPath(paths.SqlPath);

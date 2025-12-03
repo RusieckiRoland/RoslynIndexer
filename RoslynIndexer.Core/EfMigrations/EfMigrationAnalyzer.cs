@@ -686,7 +686,7 @@ namespace RoslynIndexer.Core.Sql.EfMigrations
                     return GetShortTypeName(first.Type.ToString());
             }
 
-            // Fallback: identifier variable name (used only if seeds są bardzo proste)
+            // Fallback: identifier variable name (used only when the seeds are very simple)
             if (expr is IdentifierNameSyntax id)
                 return id.Identifier.Text;
 

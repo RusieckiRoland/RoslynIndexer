@@ -17,8 +17,7 @@ namespace RoslynIndexer.Tests.EfMigrations
         [TestMethod]
         public void EfMigrations_Should_Append_MigrationNodes_AndEdges_To_Graph()
         {
-            // Na czas rozwoju: brutalne włączenie logowania z poziomu testu.
-            // Docelowo możesz to wyłączyć albo sterować tylko przez RI_TEST_VERBOSE.
+            // During development: force logging from this test for easier diagnostics.
             TestLog.Enabled = false;
 
             // Arrange
@@ -103,7 +102,7 @@ namespace RoslynIndexer.Tests.EfMigrations
                 }
                 catch
                 {
-                    // W testach nie panikujemy, jeśli sprzątanie temp się nie powiedzie.
+                    // In tests we do not treat a failed temp cleanup as fatal.
                 }
             }
         }

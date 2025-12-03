@@ -1,4 +1,5 @@
 ﻿using RoslynIndexer.Core.Logging;
+using RoslynIndexer.Core.Solutions;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -22,8 +23,54 @@ namespace RoslynIndexer.Core.Sql
         /// SQL/EF artifacts are written under: &lt;tempRoot&gt;\sql_code_bundle\*.
         /// Additionally, TABLE nodes are added to the graph so it is closed (nodes + edges).
         /// </summary>
-        public static void Run(string tempRoot, string sqlPath, string efPath)
+        /// <summary>
+        /// Runs the legacy SQL/EF graph and ensures sql_bodies.jsonl is produced.
+        /// SQL/EF artifacts are written under: <tempRoot>\sql_code_bundle\*.
+        /// Additionally, TABLE nodes are added to the graph so it is closed (nodes + edges).
+        /// </summary>
+        public static void Run(string tempRoot, string sqlPath, string efPath, string solutionPath)
         {
+            // -------------------------------------------
+            // 0) Resolve projects from solution (.sln/.slnx)
+            // -------------------------------------------
+            SolutionFileInfo? solutionInfo = null;
+            string[] projectsFromSolution = Array.Empty<string>();
+
+            if (!string.IsNullOrWhiteSpace(solutionPath))
+            {
+                try
+                {
+                    solutionInfo = SolutionFileLoader.Load(solutionPath);
+
+                    if (solutionInfo.ProjectPaths is { Count: > 0 })
+                    {
+                        projectsFromSolution = solutionInfo.ProjectPaths.ToArray();
+                        ConsoleLog.Info("[SQL/EF] Solution projects discovered: " + projectsFromSolution.Length);
+                    }
+                    else
+                    {
+                        ConsoleLog.Warn("[SQL/EF] Solution file loaded but no supported projects were found.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // We do not want to fail the whole SQL/EF run if solution parsing fails.
+                    ConsoleLog.Warn("[SQL/EF] Failed to load solution file '" + solutionPath + "': " + ex.Message);
+                }
+            }
+            else
+            {
+                ConsoleLog.Warn("[SQL/EF] No solution path provided for SQL/EF graph run.");
+            }
+
+            // NOTE:
+            // For now 'projectsFromSolution' is only resolved and logged.
+            // LegacySqlIndexer still uses sqlPath/efPath as before.
+            // In future we can use 'projectsFromSolution' to restrict EF/migrations/inline SQL scanning.
+
+            // -------------------------------------------
+            // 1) Validate SQL/EF roots (existing behavior)
+            // -------------------------------------------
             var hasSql = !string.IsNullOrWhiteSpace(sqlPath);
             var hasEf = !string.IsNullOrWhiteSpace(efPath) && Directory.Exists(efPath);
 
@@ -56,6 +103,9 @@ namespace RoslynIndexer.Core.Sql
                 ConsoleLog.Warn("[SQL/EF] No SQL root provided; running EF-only graph from: " + efPath);
             }
 
+            // -------------------------------------------
+            // 2) Run legacy SQL/EF indexer
+            // -------------------------------------------
             // All legacy SQL/EF artifacts go under this folder inside tempRoot.
             var sqlBundleRoot = Path.Combine(tempRoot, "sql_code_bundle");
             Directory.CreateDirectory(sqlBundleRoot);
@@ -81,7 +131,9 @@ namespace RoslynIndexer.Core.Sql
 
             ConsoleLog.Info("[SQL] Produced: " + sqlBodies);
 
-            // Enrich graph: add TABLE nodes and regenerate graph.json so the graph is closed.
+            // -------------------------------------------
+            // 3) Enrich graph with TABLE nodes
+            // -------------------------------------------
             try
             {
                 EnrichGraphWithTableNodes(sqlBundleRoot);
@@ -91,7 +143,6 @@ namespace RoslynIndexer.Core.Sql
                 ConsoleLog.Warn("[SQL] WARNING: failed to enrich SQL graph with TABLE nodes: " + ex.Message);
             }
         }
-
         /// <summary>
         /// Adds missing TABLE nodes based on edges.csv and regenerates graph.json from CSV files.
         /// </summary>

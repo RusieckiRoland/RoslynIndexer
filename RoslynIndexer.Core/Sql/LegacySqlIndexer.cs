@@ -156,7 +156,7 @@ namespace RoslynIndexer.Core.Sql
                 foreach (var prop in root.DescendantNodes().OfType<PropertyDeclarationSyntax>())
                 {
                     var typeText = prop.Type.ToString();
-                    if (!typeText.StartsWith("DbSet<") && !typeText.StartsWith("IDbSet<"))
+                    if (!typeText.Contains("DbSet<") && !typeText.Contains("IDbSet<"))
                         continue;
 
                     var parts = typeText.Split('<', '>');
@@ -245,7 +245,7 @@ namespace RoslynIndexer.Core.Sql
                                 {
                                     var baseTypeSimple = baseTypeText.Split('.').Last();
 
-                                    Console.WriteLine($"[ENTITY-DEBUG] Class='{cls.Identifier.Text}', BaseSyntax='{baseTypeText}'");
+                                    ConsoleLog.Debug($"[ENTITY-DEBUG]  Class='{cls.Identifier.Text}', BaseSyntax='{baseTypeText}'");
 
                                     matchesBase = dbGraphCfg.EntityBaseTypes.Any(cfgType =>
                                     {
@@ -346,7 +346,7 @@ namespace RoslynIndexer.Core.Sql
                                     pocoBodies[entityKey].BodyRelPath));
                         }
 
-                        Console.WriteLine($"[ENTITY-DEBUG]   -> ENTITY node added for '{entityName}' ({entityKey})");
+                        ConsoleLog.Debug($"[ENTITY-DEBUG]    -> ENTITY node added for '{entityName}' ({entityKey})");
 
                         // Best-effort: try to find / create TABLE node to attach MapsTo.
                         bool mapFound = false;
@@ -1542,7 +1542,7 @@ namespace RoslynIndexer.Core.Sql
                 return;
             }
 
-            // InlineSqlScanner przyjmuje jeden string z separatorami.
+            // InlineSqlScanner expects a single string with separators.
             var rootsCombined = string.Join(";", rootsList);
 
             ConsoleLog.Info($"Inline-SQL (scanner): scanning roots: {rootsCombined}");
@@ -2360,7 +2360,7 @@ namespace RoslynIndexer.Core.Sql
             // 3) Inline-SQL (C# methods with raw SQL literals)
             if (GlobalInlineSqlRoots != null && GlobalInlineSqlRoots.Length > 0)
             {
-                // Docelowo zawsze używamy InlineSqlScanner + adaptera.
+                // In the long term we always want to use InlineSqlScanner together with the adapter.
                 AppendInlineSqlEdgesAndNodes_UsingScanner(
                  inlineSqlRoots: GlobalInlineSqlRoots,
                  sqlRoot: sqlRoot,
@@ -2447,17 +2447,18 @@ namespace RoslynIndexer.Core.Sql
         }
 
         /// <summary>
-        /// Best-effort recovery of C# method context for an InlineSQL artifact
-        /// based on SourcePath + LineNumber. Najpierw próbujemy znaleźć metodę,
-        /// która zawiera podaną linię; jeżeli się nie uda, bierzemy metodę,
-        /// której zakres jest "najbliżej" tej linii.
+        /// Best-effort recovery of the C# method context for an InlineSQL artifact
+        /// based on SourcePath + LineNumber. First we try to find the method that
+        /// contains the given line; if that fails, we fall back to the method whose
+        /// span is closest to that line.
         /// </summary>
+
         private static void TryPopulateMethodContextFromFile(SqlArtifact artifact)
         {
             if (artifact == null)
                 return;
 
-            // Jeżeli ktoś już wcześniej wypełnił MethodFullName – nie ruszamy.
+            // If MethodFullName has already been populated, leave it unchanged.
             if (!string.IsNullOrWhiteSpace(artifact.MethodFullName))
                 return;
 
@@ -2482,7 +2483,7 @@ namespace RoslynIndexer.Core.Sql
                 MethodDeclarationSyntax? method = null;
                 var line = artifact.LineNumber;
 
-                // 1) Najpierw klasyczne "czy linia wpada w zakres metody".
+                // 1) First, use the standard check: does the line fall within the method span?
                 if (line.HasValue && line.Value > 0)
                 {
                     var target = line.Value;
@@ -2495,8 +2496,8 @@ namespace RoslynIndexer.Core.Sql
                         return target >= start && target <= end;
                     });
 
-                    // 2) Jeżeli exact-hit się nie udał (np. lekko przesunięte linie),
-                    // wybieramy metodę, której zakres jest "najbliżej" danej linii.
+                    // 2) If there is no exact hit (for example, line numbers shifted slightly),
+                    //    select the method whose span is closest to the requested line.
                     if (method == null)
                     {
                         method = methods
@@ -2514,8 +2515,8 @@ namespace RoslynIndexer.Core.Sql
                     }
                 }
 
-                // 3) Brak linii w artefakcie – bierzemy po prostu pierwszą metodę
-                // z pliku (bez kombinacji). To i tak lepsze niż brak kontekstu.
+                // 3) If the artifact has no line information, fall back to the first method
+                //    in the file. This is still better than having no context at all.
                 if (method == null)
                     method = methods.FirstOrDefault();
 
@@ -2569,8 +2570,8 @@ namespace RoslynIndexer.Core.Sql
             }
             catch
             {
-                // Fallback only – nie zabijamy indeksowania, najwyżej artefakt
-                // zostanie bez kontekstu metody.
+                // Fallback only – do not fail the entire indexing run;
+                // at worst this artifact will remain without method context.
             }
         }
 

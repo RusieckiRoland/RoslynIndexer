@@ -22,10 +22,10 @@ namespace RoslynIndexer.Tests.BasicCSharp
 
             try
             {
-                // 1) Seed minimalnego projektu i .sln
+                // 1) Seed a minimal project and solution.
                 Seeds.SeedBasicCSharp(testRoot, out var slnPath, out _);
 
-                // 2) Odpal runnera bez pliku config (ścieżki tylko przez CLI)
+                // 2) Run the runner without a config file (paths are passed via CLI only).
                 string tempRoot = Path.Combine(testRoot, "ArtifactsTemp");
                 string runnerProj = RunnerTestHelpers.FindRunnerProjectOrInconclusive();
 
@@ -41,7 +41,7 @@ namespace RoslynIndexer.Tests.BasicCSharp
                     Assert.Fail($"Runner failed (exit {exit}). First lines:\n{head}");
                 }
 
-                // 3) ZIP istnieje? (runner pakuje <tempRoot> i usuwa folder)
+                // 3) Verify that the ZIP exists (the runner packs <tempRoot> and deletes the folder).
                 string zipPath = tempRoot + ".zip";
                 if (!File.Exists(zipPath))
                 {
@@ -50,12 +50,12 @@ namespace RoslynIndexer.Tests.BasicCSharp
                     zipPath = zips.OrderByDescending(File.GetCreationTimeUtc).First();
                 }
 
-                // 4) Weryfikacja artefaktów standardowych
+                // 4) Verify that all standard artifacts are present.
                 RunnerTestHelpers.AssertZipHasStandardArtifacts(zipPath);
             }
             finally
             {
-                try { if (Directory.Exists(testRoot)) Directory.Delete(testRoot, true); } catch { /* zostaw do inspekcji */ }
+                try { if (Directory.Exists(testRoot)) Directory.Delete(testRoot, true); } catch {  /* keep for inspection if cleanup fails */}
             }
         }
 

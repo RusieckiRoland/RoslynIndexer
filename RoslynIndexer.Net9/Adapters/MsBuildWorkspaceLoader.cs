@@ -253,14 +253,24 @@ namespace RoslynIndexer.Net9.Adapters
         /// <summary>
         /// Counts the number of supported project entries in the .sln file (C#/VB/F#) to drive progress percentage.
         /// </summary>
+
         private static int CountSupportedProjectsInSolution(string slnPath)
         {
             try
             {
+                bool isSlnx = slnPath.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase);
                 int total = 0;
+
                 foreach (var line in File.ReadLines(slnPath))
                 {
-                    if (!line.StartsWith("Project(", StringComparison.Ordinal)) continue;
+                    // Dla klasycznego .sln: tylko linie Project(...)
+                    if (!isSlnx)
+                    {
+                        if (!line.StartsWith("Project(", StringComparison.Ordinal))
+                            continue;
+                    }
+
+                    // Dla .slnx liczymy po wystąpieniach *.csproj / *.vbproj / *.fsproj
                     if (line.IndexOf(".csproj", StringComparison.OrdinalIgnoreCase) >= 0
                         || line.IndexOf(".vbproj", StringComparison.OrdinalIgnoreCase) >= 0
                         || line.IndexOf(".fsproj", StringComparison.OrdinalIgnoreCase) >= 0)
@@ -268,10 +278,15 @@ namespace RoslynIndexer.Net9.Adapters
                         total++;
                     }
                 }
+
                 return total;
             }
-            catch { return 0; }
+            catch
+            {
+                return 0;
+            }
         }
+
 
         /// <summary>
         /// Returns the ticker delay in milliseconds from the environment, or a default value.
