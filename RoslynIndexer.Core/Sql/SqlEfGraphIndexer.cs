@@ -1853,10 +1853,10 @@ namespace RoslynIndexer.Core.Sql
         {
             ConsoleLog.Info("SQL stage: scanning .sql files…");
             var ignore = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            {
-                "Change Scripts","ChangeScripts","Initial Data","InitialData",
-                "Snapshots","Tools",".git",".vs","bin","obj"
-            };
+    {
+        "Change Scripts","ChangeScripts","Initial Data","InitialData",
+        "Snapshots","Tools",".git",".vs","bin","obj"
+    };
 
             IEnumerable<string> EnumerateSql(string dir)
             {
@@ -1883,6 +1883,10 @@ namespace RoslynIndexer.Core.Sql
             var bodiesDir = Path.Combine(outDir, "docs", "bodies");
             var bodiesJsonl = Path.Combine(outDir, "docs", "sql_bodies.jsonl");
             Directory.CreateDirectory(bodiesDir);
+
+            // One entry per absolute body path – first writer wins, others skip writing.
+            var bodyWritten = new ConcurrentDictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+
             int bodiesCount = 0;
 
             using (var bodiesWriter = new StreamWriter(bodiesJsonl, false, new UTF8Encoding(false)))
@@ -1901,13 +1905,19 @@ namespace RoslynIndexer.Core.Sql
                                 var fragment = parser.Parse(sr, out errors);
                                 if (errors != null && errors.Count > 0)
                                 {
-                                    var msg = string.Join("; ",
-                                        errors.Take(2).Select(e => e.Message + " (L" + e.Line + ",C" + e.Column + ")"));
+                                    var msg = string.Join(
+                                        "; ",
+                                        errors
+                                            .Take(2)
+                                            .Select(e => e.Message + " (L" + e.Line + ",C" + e.Column + ")"));
+
                                     ConsoleLog.Warn("[" + Path.GetFileName(path) + "] parser errors: " + msg);
                                 }
 
                                 var script = fragment as TSqlScript;
-                                if (script == null) return;
+                                if (script == null)
+                                    return;
+
                                 var domain = DeriveDomain(sqlRoot, path);
                                 var isPrePost = IsPreOrPostDeployment(path);
 
@@ -1939,37 +1949,73 @@ namespace RoslynIndexer.Core.Sql
                                             : "(anon)";
 
                                         string bodyRelPath = null;
+
                                         if (IsBodyKind(def.Item2))
                                         {
                                             var fileName = schema + "." + name + "." + def.Item2 + ".sql";
                                             var bodyAbs = Path.Combine(bodiesDir, fileName);
-                                            string scripted;
-                                            lock (SqlGen)
-                                            {
-                                                SqlGen.GenerateScript(def.Item3, out scripted);
-                                                File.WriteAllText(bodyAbs, scripted, new UTF8Encoding(false));
-                                            }
-
                                             bodyRelPath = "docs/bodies/" + fileName;
 
-                                            lock (bodiesWriter)
+                                            // Only the first thread that touches this bodyAbs actually writes the file + JSONL.
+                                            var isFirstWriter = bodyWritten.TryAdd(bodyAbs, true);
+
+                                            if (isFirstWriter)
                                             {
-                                                var obj = new
+                                                string scripted;
+                                                lock (SqlGen)
                                                 {
-                                                    key,
-                                                    kind = def.Item2,
-                                                    schema,
-                                                    name,
-                                                    domain,
-                                                    file = path,
-                                                    body = File.ReadAllText(bodyAbs, Encoding.UTF8)
-                                                };
-                                                bodiesWriter.WriteLine(JsonConvert.SerializeObject(obj));
-                                                bodiesCount++;
+                                                    SqlGen.GenerateScript(def.Item3, out scripted);
+                                                }
+
+                                                try
+                                                {
+                                                    File.WriteAllText(bodyAbs, scripted, new UTF8Encoding(false));
+                                                }
+                                                catch (IOException ioEx)
+                                                {
+                                                    ConsoleLog.Warn(
+                                                        "[SQL:Body] failed to write body file '" +
+                                                        bodyAbs + "': " + ioEx.Message);
+                                                }
+                                                catch (UnauthorizedAccessException uaEx)
+                                                {
+                                                    ConsoleLog.Warn(
+                                                        "[SQL:Body] unauthorized to write body file '" +
+                                                        bodyAbs + "': " + uaEx.Message);
+                                                }
+
+                                                // Use the generated script text for JSONL.
+                                                lock (bodiesWriter)
+                                                {
+                                                    var obj = new
+                                                    {
+                                                        key,
+                                                        kind = def.Item2,
+                                                        schema,
+                                                        name,
+                                                        domain,
+                                                        file = path,
+                                                        body = scripted
+                                                    };
+
+                                                    bodiesWriter.WriteLine(JsonConvert.SerializeObject(obj));
+                                                    Interlocked.Increment(ref bodiesCount);
+                                                }
                                             }
+                                            // If not first writer: we still keep bodyRelPath on the node,
+                                            // but we do not rewrite the same file or JSONL entry again.
                                         }
 
-                                        var node = new NodeRow(key, def.Item2, name, schema, path, bi, domain, bodyRelPath);
+                                        var node = new NodeRow(
+                                            key,
+                                            def.Item2,
+                                            name,
+                                            schema,
+                                            path,
+                                            bi,
+                                            domain,
+                                            bodyRelPath);
+
                                         nodes.TryAdd(key, node);
                                         definedKinds.TryAdd(NameKey(def.Item1), def.Item2);
 
@@ -1977,14 +2023,14 @@ namespace RoslynIndexer.Core.Sql
                                         {
                                             var toKeyBase = NameKey(r.Item1);
                                             var toKind = r.Item2 ?? "UNKNOWN";
+
                                             edges.Add(new EdgeRow(
                                                 from: key,
                                                 to: toKeyBase + "|" + toKind,
                                                 relation: r.Item3 ?? "Uses",
                                                 toKind: toKind,
                                                 file: path,
-                                                batch: bi
-                                            ));
+                                                batch: bi));
                                         }
                                     }
                                 }
@@ -2003,7 +2049,7 @@ namespace RoslynIndexer.Core.Sql
             {
                 var split = SplitToNameAndKind(e.To);
                 var baseName = split.Item1;
-                var _kind = split.Item2;
+                var kind = split.Item2;
 
                 if (definedKinds.TryGetValue(baseName, out var realKind))
                 {
@@ -2040,11 +2086,23 @@ namespace RoslynIndexer.Core.Sql
 
                     nodes.TryAdd(
                         e.To,
-                        new NodeRow(e.To, kind, name, schema, null, null, "(external)", null));
+                        new NodeRow(
+                            e.To,
+                            kind,
+                            name,
+                            schema,
+                            null,
+                            null,
+                            "(external)",
+                            null));
                 }
             }
 
-            ConsoleLog.Info("SQL stage finished: nodes=" + nodes.Count + ", edges=" + fixedEdges.Count + ", bodies=" + bodiesCount);
+            ConsoleLog.Info(
+                "SQL stage finished: nodes=" + nodes.Count +
+                ", edges=" + fixedEdges.Count +
+                ", bodies=" + bodiesCount);
+
             return (nodes, fixedEdges, bodiesCount);
         }
 
