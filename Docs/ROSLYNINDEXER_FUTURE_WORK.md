@@ -180,6 +180,20 @@ Once the Configuration Module exists, additional capabilities become possible:
 - impact analysis for configuration changes.
 
 ---
+### 6.1 Frontend / UI indexing (independent of technology)
+
+Regardless of whether the UI layer is built with **WPF/WinUI 3**, **HTML/Razor/MVC**, **Angular**, or any other frontend technology, full-system understanding requires a **separate frontend indexing pipeline** and a **UI dependency graph**.
+
+Key goal:
+
+- Model user-reported flows (“click here → error”) by linking **UI entry points** to backend endpoints/handlers and then to data/configuration.
+
+Expected outputs (future):
+
+- `frontend_bundle/` (or `ui_bundle/`) containing extracted UI artifacts and normalized metadata,
+- `ui_graph.json` linking UI elements/routes/views/components to backend actions/endpoints and relevant configuration fragments,
+- explicit retrieval step in the RAG pipeline (similar to `retrieve_config`) for UI context when needed.
+---
 
 ## 7. Summary
 
