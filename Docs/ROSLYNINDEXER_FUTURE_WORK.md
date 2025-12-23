@@ -195,6 +195,27 @@ Expected outputs (future):
 - explicit retrieval step in the RAG pipeline (similar to `retrieve_config`) for UI context when needed.
 ---
 
+### 6.2 Source snapshot labeling (branch vs tag)
+
+To make configuration (and code) analysis reproducible and unambiguous across checkpoints, every indexed snapshot should have a stable, human-meaningful label.
+
+Rule:
+- If a Git **tag** exists on the indexed commit/checkpoint, prefer the **tag name** as the snapshot label.
+- Otherwise, use the **branch name**.
+- Additionally, allow explicit selection/override (user chooses: tag vs branch vs custom label) when generating the bundle.
+
+Rationale:
+- Tags usually represent releases or meaningful milestones, and remain stable over time.
+- Branch names can move and may become misleading for historical checkpoints.
+- Stable labeling improves: environment diffs, regression tracing, evaluation runs, and cross-branch comparisons.
+
+Suggested manifest fields:
+- `snapshot.commit_sha`
+- `snapshot.branch_name` (if known)
+- `snapshot.tag_name` (if present)
+- `snapshot.label` (final chosen label used everywhere)
+
+
 ## 7. Summary
 
 **Configuration has become a first-class source of truth in modern systems.  
