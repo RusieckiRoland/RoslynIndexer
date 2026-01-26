@@ -42,6 +42,24 @@ namespace RoslynIndexer.Core.Helpers
                 var headSha = RunGit("rev-parse HEAD", root)?.Trim();
                 var branch = RunGit("rev-parse --abbrev-ref HEAD", root)?.Trim();
 
+                // Prefer tag name as snapshot label if HEAD is exactly at a tag.
+                var tag = RunGit("describe --tags --exact-match", root)?.Trim();
+                if (string.IsNullOrWhiteSpace(tag))
+                {
+                    var tags = RunGit("tag --points-at HEAD", root);
+                    if (!string.IsNullOrWhiteSpace(tags))
+                    {
+                        tag = tags
+                            .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                            .FirstOrDefault();
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(tag))
+                {
+                    branch = tag;
+                }
+
                 // 2) Fallback to .git files if CLI failed/absent
                 if (string.IsNullOrEmpty(headSha) || string.IsNullOrEmpty(branch))
                 {
@@ -49,6 +67,7 @@ namespace RoslynIndexer.Core.Helpers
                     if (string.IsNullOrEmpty(branch)) branch = fbi.Branch;
                     if (string.IsNullOrEmpty(headSha)) headSha = fbi.HeadSha;
                 }
+
 
                 return new GitInfo
                 {
