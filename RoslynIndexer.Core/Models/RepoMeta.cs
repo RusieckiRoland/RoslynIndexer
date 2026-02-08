@@ -7,9 +7,12 @@ namespace RoslynIndexer.Core.Models
     /// </summary>
     public sealed class RepoMeta
     {
+        public string RepoName { get; set; }
+
         public string Branch { get; set; }
         public string HeadSha { get; set; }
         public string RepositoryRoot { get; set; }
+        public string FolderFingerprint { get; set; }
         public DateTime GeneratedAtUtc { get; set; }
     }
 }

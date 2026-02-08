@@ -308,11 +308,17 @@ internal class Program
         var codeOutDir = Path.Combine(tempRoot, "regular_code_bundle");
         var meta = new RepoMeta
         {
+            RepoName = Path.GetFileNameWithoutExtension(solutionPath),
             Branch = git.Branch ?? "",
             HeadSha = git.HeadSha ?? "",
             RepositoryRoot = git.RepoRoot ?? "",
-            GeneratedAtUtc = DateTime.UtcNow
+            GeneratedAtUtc = DateTime.UtcNow,
+            
         };
+        if (meta.HeadSha == "")
+        {
+            meta.FolderFingerprint = FolderFingerprint.ComputeForSolutionOrFolder(solutionPath);
+        }
 
         ArtifactWriter.WriteCodeArtifacts(
             branchRoot: tempRoot,
