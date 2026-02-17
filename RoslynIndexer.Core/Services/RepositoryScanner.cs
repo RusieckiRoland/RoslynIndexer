@@ -28,7 +28,7 @@ namespace RoslynIndexer.Core.Services
                                                  // optional: nothing to scan yet, but EnumerateFiles on empty directory is safe
             }
 
-            foreach (var abs in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+            foreach (var abs in SafeEnumerateFiles(root))
             {
                 var ext = Path.GetExtension(abs);
                 if (!_known.Contains(ext)) continue;
@@ -42,6 +42,43 @@ namespace RoslynIndexer.Core.Services
                     sizeBytes: fi.Length,
                     lastWriteUtc: fi.LastWriteTimeUtc
                 );
+            }
+        }
+
+        private static IEnumerable<string> SafeEnumerateFiles(string root)
+        {
+            var pending = new Stack<string>();
+            pending.Push(root);
+
+            while (pending.Count > 0)
+            {
+                var current = pending.Pop();
+
+                string[] subdirs;
+                try
+                {
+                    subdirs = Directory.GetDirectories(current);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                foreach (var d in subdirs)
+                    pending.Push(d);
+
+                string[] files;
+                try
+                {
+                    files = Directory.GetFiles(current);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                foreach (var f in files)
+                    yield return f;
             }
         }
     }

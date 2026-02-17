@@ -53,9 +53,10 @@ namespace RoslynIndexer.Core.Sql
                 foreach (var token in arr)
                 {
                     // Accept only non-empty strings, ignore everything else.
-                    var value = token.Type == JTokenType.String
-                        ? (string?)token
-                        : token.ToString();
+                    if (token.Type != JTokenType.String)
+                        continue;
+
+                    var value = (string?)token;
 
                     if (string.IsNullOrWhiteSpace(value))
                         continue;

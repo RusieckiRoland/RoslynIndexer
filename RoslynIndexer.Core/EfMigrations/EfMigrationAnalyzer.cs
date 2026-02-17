@@ -551,7 +551,7 @@ namespace RoslynIndexer.Core.Sql.EfMigrations
         /// <summary>
         /// Flatten member access chain into ["Create", "Table", "OnTable", ...].
         /// Root-most identifier comes first.
-        /// Supports both simple and generic method names (e.g. AddColumn, AddColumn<int>).
+        /// Supports both simple and generic method names (e.g. AddColumn, AddColumn&lt;int&gt;).
         /// </summary>
         private static List<string> FlattenMemberAccess(ExpressionSyntax expression)
         {

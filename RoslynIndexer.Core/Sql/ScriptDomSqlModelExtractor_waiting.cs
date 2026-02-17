@@ -49,14 +49,43 @@ namespace RoslynIndexer.Core.Sql
 
         private static IEnumerable<string> EnumerateSql(string dir, HashSet<string> ignore)
         {
-            foreach (var d in Directory.EnumerateDirectories(dir))
+            var pending = new Stack<string>();
+            pending.Push(dir);
+
+            while (pending.Count > 0)
             {
-                var name = Path.GetFileName(d);
-                if (ignore.Contains(name)) continue;
-                foreach (var f in EnumerateSql(d, ignore)) yield return f;
+                var current = pending.Pop();
+
+                string[] subdirs;
+                try
+                {
+                    subdirs = Directory.GetDirectories(current);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                foreach (var d in subdirs)
+                {
+                    var name = Path.GetFileName(d);
+                    if (ignore.Contains(name)) continue;
+                    pending.Push(d);
+                }
+
+                string[] files;
+                try
+                {
+                    files = Directory.GetFiles(current, "*.sql");
+                }
+                catch
+                {
+                    continue;
+                }
+
+                foreach (var f in files)
+                    yield return f;
             }
-            foreach (var f in Directory.EnumerateFiles(dir, "*.sql"))
-                yield return f;
         }
 
         private static IEnumerable<SqlArtifact> ExtractFromFile(string path)

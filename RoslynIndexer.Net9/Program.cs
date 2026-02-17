@@ -7,6 +7,7 @@ using RoslynIndexer.Core.Helpers;       // ArchiveUtils
 using RoslynIndexer.Core.Models;
 using RoslynIndexer.Core.Pipeline;
 using RoslynIndexer.Core.Services;      // RepositoryScanner, FileHasher, CSharpAnalyzer
+using RoslynIndexer.Core.Security.Runtime;
 using RoslynIndexer.Core.Sql;           // SqlEfGraphRunner, SqlEfGraphIndexer
 using RoslynIndexer.Core.Logging;       // ConsoleLog
 
@@ -113,6 +114,16 @@ internal class Program
             ConsoleLog.Info("[CFG] No config provided. Use --config \"D:\\\\config.json\"");
             SqlEfGraphIndexer.GlobalDbGraphConfig = DbGraphConfig.Empty;
         }
+
+        var securityBootstrap = ChunkSecurityBootstrap.TryCreate(cfg, cfgBaseDir);
+        if (!securityBootstrap.IsValid)
+            throw new ArgumentException("[security] " + string.Join(" | ", securityBootstrap.Errors));
+
+        foreach (var warning in securityBootstrap.Warnings)
+            ConsoleLog.Warn("[security] " + warning);
+
+        if (securityBootstrap.IsEnabled)
+            ConsoleLog.Info("[security] Security policy loaded.");
 
         // ===============================
         // 3) Resolve inputs (CLI -> cfg.paths -> cfg.* -> ENV)
@@ -240,8 +251,9 @@ internal class Program
         var sqlExtractor = new ScriptDomSqlModelExtractor_waiting();
         var pipeline = new IndexingPipeline(scanner, hasher, cs, sqlExtractor);
 
+        var repoRootForScan = Path.GetDirectoryName(solutionPath) ?? tempRoot;
         var paths = new RepoPaths(
-            repoRoot: tempRoot,
+            repoRoot: repoRootForScan,
             solutionPath: solutionPath,
             sqlPath: sqlPath,
             efMigrationsPath: null,   // EF graph is handled separately by SqlEfGraphIndexer
@@ -304,6 +316,20 @@ internal class Program
 
         var chunks = extraction.chunks;
         var deps = extraction.deps;
+
+        if (securityBootstrap.Engine != null)
+        {
+            var securityResult = ChunkSecurityEnricher.Apply(
+                chunks: chunks,
+                repoRoot: git.RepoRoot ?? Path.GetDirectoryName(solutionPath),
+                engine: securityBootstrap.Engine);
+
+            ConsoleLog.Info("[security] Applied to " + securityResult.EnrichedChunkCount + " chunk(s).");
+            foreach (var warning in securityResult.Warnings.Take(20))
+                ConsoleLog.Warn("[security] " + warning);
+            if (securityResult.Warnings.Count > 20)
+                ConsoleLog.Warn("[security] Additional warnings skipped: " + (securityResult.Warnings.Count - 20));
+        }
 
         var codeOutDir = Path.Combine(tempRoot, "regular_code_bundle");
         var meta = new RepoMeta

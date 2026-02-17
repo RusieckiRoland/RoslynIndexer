@@ -23,11 +23,6 @@ namespace RoslynIndexer.Core.Sql
         /// SQL/EF artifacts are written under: &lt;tempRoot&gt;\sql_code_bundle\*.
         /// Additionally, TABLE nodes are added to the graph so it is closed (nodes + edges).
         /// </summary>
-        /// <summary>
-        /// Runs the legacy SQL/EF graph and ensures sql_bodies.jsonl is produced.
-        /// SQL/EF artifacts are written under: <tempRoot>\sql_code_bundle\*.
-        /// Additionally, TABLE nodes are added to the graph so it is closed (nodes + edges).
-        /// </summary>
         public static void Run(string tempRoot, string sqlPath, string efPath, string solutionPath)
         {
             // -------------------------------------------
